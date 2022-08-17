@@ -2,11 +2,13 @@ pub mod block;
 pub mod compact;
 mod util;
 
+use std::cell::RefCell;
 use std::fmt;
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::sync::Arc;
 
+#[derive(Debug)]
 pub enum ShaleError {
     LinearMemStoreError,
     DecodeError,
@@ -67,30 +69,36 @@ pub trait LinearMemImage {
 
 /// Records a context of changes made to the [ShaleStore].
 pub struct WriteContext {
-    writes: Vec<(DiskWrite, MemRollback, Arc<dyn LinearMemImage>)>,
+    writes: RefCell<Vec<(DiskWrite, MemRollback, Arc<dyn LinearMemImage>)>>,
 }
 
 impl WriteContext {
     pub fn new() -> Self {
-        Self { writes: Vec::new() }
+        Self {
+            writes: RefCell::new(Vec::new()),
+        }
     }
 
     fn add(
-        &mut self, dw: DiskWrite, mw: MemRollback, mem: Arc<dyn LinearMemImage>,
+        &self, dw: DiskWrite, mw: MemRollback, mem: Arc<dyn LinearMemImage>,
     ) {
-        self.writes.push((dw, mw, mem.clone()))
+        self.writes.borrow_mut().push((dw, mw, mem.clone()))
     }
 
     /// Returns an atomic group of writes that should be done by a persistent store to make
     /// in-memory change persistent. Each write is made to one logic linear space specified
     /// by `space_id`. The `data` should be written from `space_off` in that linear space.
     pub fn commit(self) -> Vec<DiskWrite> {
-        self.writes.into_iter().map(|(dw, _, _)| dw).collect()
+        self.writes
+            .into_inner()
+            .into_iter()
+            .map(|(dw, _, _)| dw)
+            .collect()
     }
 
     /// Abort all changes.
     pub fn abort(self) {
-        for (dw, mw, mem) in self.writes {
+        for (dw, mw, mem) in self.writes.into_inner() {
             if let MemRollback::Rollback(r) = mw {
                 mem.overwrite(dw.space_off, &r);
             }
@@ -185,7 +193,7 @@ impl<'a, T: ?Sized> ObjRef<'a, T> {
 impl<'a, T: ?Sized> ObjRef<'a, T> {
     pub fn write(
         &mut self, modify: impl FnOnce(&mut T) -> (), mem_rollback: bool,
-        wctx: &mut WriteContext,
+        wctx: &WriteContext,
     ) {
         let mw = if mem_rollback {
             MemRollback::Rollback(self.inner.to_mem_image())
@@ -239,12 +247,12 @@ pub trait ShaleStore {
         &'a self, ptr: ObjPtr<T>,
     ) -> Result<ObjRef<'a, T>, ShaleError>;
     /// Allocate a new item.
-    fn new_item<T: MummyItem>(
-        &mut self, wctx: &mut WriteContext,
-    ) -> Result<ObjPtr<T>, ShaleError>;
+    fn put_item<'a, T: MummyItem + 'a>(
+        &'a self, item: T, wctx: &WriteContext,
+    ) -> Result<ObjRef<'a, T>, ShaleError>;
     /// Free a item and recycle its space when applicable.
     fn free_item<T: MummyItem>(
-        &mut self, item: ObjPtr<T>, wctx: &mut WriteContext,
+        &mut self, item: ObjPtr<T>, wctx: &WriteContext,
     ) -> Result<(), ShaleError>;
 }
 
@@ -270,7 +278,7 @@ pub struct MummyRef<T> {
     raw: Box<dyn LinearRef>,
 }
 
-impl<T: MummyItem> Deref for MummyRef<T> {
+impl<T> Deref for MummyRef<T> {
     type Target = T;
     fn deref(&self) -> &T {
         &self.decoded
@@ -302,13 +310,28 @@ impl<T: MummyItem> MummyRef<T> {
                 .ok_or(ShaleError::LinearMemStoreError)?,
         })
     }
+}
+
+impl<T> MummyRef<T> {
+    unsafe fn new_from_slice(
+        addr: u64, length: u64, decoded: T, space: &dyn LinearMemImage,
+    ) -> Result<Self, ShaleError> {
+        Ok(Self {
+            decoded,
+            raw: space
+                .get_ref(addr, length)
+                .ok_or(ShaleError::LinearMemStoreError)?,
+        })
+    }
 
     pub unsafe fn slice<'b, U: MummyItem + 'b>(
-        s: &ObjRef<'b, T>, offset: u64,
+        s: &ObjRef<'b, T>, offset: u64, length: u64, decoded: U,
     ) -> Result<ObjRef<'b, U>, ShaleError> {
         let addr = s.addr + offset;
-        let r = Box::new(MummyRef::new(
+        let r = Box::new(MummyRef::new_from_slice(
             addr,
+            length,
+            decoded,
             s.inner.as_linear_ref().linear_memstore().as_ref(),
         )?);
         Ok(ObjRef {
@@ -320,6 +343,10 @@ impl<T: MummyItem> MummyRef<T> {
 }
 
 impl<T> MummyItem for ObjPtr<T> {
+    fn dehydrate(&self) -> Vec<u8> {
+        self.addr().to_le_bytes().into()
+    }
+
     fn hydrate(
         addr: u64, mem: &dyn LinearMemImage,
     ) -> Result<(u64, Self), ShaleError> {
@@ -335,8 +362,5 @@ impl<T> MummyItem for ObjPtr<T> {
                 )),
             ))
         }
-    }
-    fn dehydrate(&self) -> Vec<u8> {
-        self.addr().to_le_bytes().into()
     }
 }

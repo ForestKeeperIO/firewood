@@ -2,6 +2,7 @@ use super::{
     LinearMemImage, MummyItem, MummyRef, ObjPtr, ObjRef, ShaleError,
     ShaleStore, WriteContext,
 };
+use std::cell::UnsafeCell;
 use std::mem::size_of;
 
 struct CompactHeader {
@@ -139,10 +140,20 @@ impl CompactSpaceHeader {
     ) -> Result<CompactSpaceHeaderSliced<'a>, ShaleError> {
         unsafe {
             Ok(CompactSpaceHeaderSliced {
-                meta_space_tail: MummyRef::slice(&r, 0)?,
-                compact_space_tail: MummyRef::slice(&r, 8)?,
-                base_addr: MummyRef::slice(&r, 16)?,
-                alloc_addr: MummyRef::slice(&r, 24)?,
+                meta_space_tail: MummyRef::slice(
+                    &r,
+                    0,
+                    8,
+                    U64Field(r.meta_space_tail),
+                )?,
+                compact_space_tail: MummyRef::slice(
+                    &r,
+                    8,
+                    8,
+                    U64Field(r.compact_space_tail),
+                )?,
+                base_addr: MummyRef::slice(&r, 16, 8, r.base_addr)?,
+                alloc_addr: MummyRef::slice(&r, 24, 8, r.alloc_addr)?,
             })
         }
     }
@@ -290,8 +301,7 @@ impl CompactSpaceInner {
     }
 
     fn del_desc(
-        &mut self, desc_addr: ObjPtr<CompactDescriptor>,
-        wctx: &mut WriteContext,
+        &mut self, desc_addr: ObjPtr<CompactDescriptor>, wctx: &WriteContext,
     ) -> Result<(), ShaleError> {
         let desc_size = CompactDescriptor::MSIZE;
         debug_assert!(
@@ -316,7 +326,7 @@ impl CompactSpaceInner {
     }
 
     fn new_desc(
-        &mut self, wctx: &mut WriteContext,
+        &mut self, wctx: &WriteContext,
     ) -> Result<ObjPtr<CompactDescriptor>, ShaleError> {
         let addr = **self.header.meta_space_tail;
         self.header.meta_space_tail.write(
@@ -328,7 +338,7 @@ impl CompactSpaceInner {
     }
 
     fn free(
-        &mut self, addr: u64, wctx: &mut WriteContext,
+        &mut self, addr: u64, wctx: &WriteContext,
     ) -> Result<(), ShaleError> {
         let hsize = CompactHeader::MSIZE;
         let fsize = CompactFooter::MSIZE;
@@ -427,7 +437,7 @@ impl CompactSpaceInner {
     }
 
     fn alloc_from_freed(
-        &mut self, length: u64, wctx: &mut WriteContext,
+        &mut self, length: u64, wctx: &WriteContext,
     ) -> Result<Option<u64>, ShaleError> {
         let tail = **self.header.meta_space_tail;
         if tail == self.header.base_addr.addr {
@@ -549,7 +559,7 @@ impl CompactSpaceInner {
     }
 
     fn alloc_new(
-        &mut self, length: u64, wctx: &mut WriteContext,
+        &mut self, length: u64, wctx: &WriteContext,
     ) -> Result<u64, ShaleError> {
         let offset = **self.header.compact_space_tail;
         let regn_size = 1 << self.regn_nbit;
@@ -586,7 +596,7 @@ impl CompactSpaceInner {
 }
 
 pub struct CompactSpace {
-    inner: CompactSpaceInner,
+    inner: UnsafeCell<CompactSpaceInner>,
 }
 
 impl CompactSpace {
@@ -597,43 +607,48 @@ impl CompactSpace {
         regn_nbit: u64,
     ) -> Result<Self, ShaleError> {
         let cs = CompactSpace {
-            inner: CompactSpaceInner {
+            inner: UnsafeCell::new(CompactSpaceInner {
                 meta_space,
                 compact_space,
                 header: CompactSpaceHeader::into_fields(header)?,
                 alloc_max_walk,
                 regn_nbit,
-            },
+            }),
         };
         Ok(cs)
     }
 }
 
 impl ShaleStore for CompactSpace {
-    fn new_item<T: MummyItem>(
-        &mut self, wctx: &mut WriteContext,
-    ) -> Result<ObjPtr<T>, ShaleError> {
-        let size = size_of::<T>() as u64;
-        Ok(unsafe {
+    fn put_item<'a, T: MummyItem + 'a>(
+        &'a self, item: T, wctx: &WriteContext,
+    ) -> Result<ObjRef<'a, T>, ShaleError> {
+        let bytes = item.dehydrate();
+        let size = bytes.len() as u64;
+        let inner = unsafe { &mut *self.inner.get() };
+        let ptr = unsafe {
             ObjPtr::new_from_addr(
-                if let Some(addr) = self.inner.alloc_from_freed(size, wctx)? {
+                if let Some(addr) = inner.alloc_from_freed(size, wctx)? {
                     addr
                 } else {
-                    self.inner.alloc_new(size, wctx)?
+                    inner.alloc_new(size, wctx)?
                 },
             )
-        })
+        };
+        let mut u: ObjRef<T> = inner.get_data_ref(ptr)?;
+        u.write(|u| *u = item, true, wctx);
+        Ok(u)
     }
 
     fn free_item<T: MummyItem>(
-        &mut self, item: ObjPtr<T>, wctx: &mut WriteContext,
+        &mut self, item: ObjPtr<T>, wctx: &WriteContext,
     ) -> Result<(), ShaleError> {
-        self.inner.free(item.addr(), wctx)
+        self.inner.get_mut().free(item.addr(), wctx)
     }
 
     fn get_item<'a, T: MummyItem + 'a>(
         &'a self, ptr: ObjPtr<T>,
     ) -> Result<ObjRef<'a, T>, ShaleError> {
-        self.inner.get_data_ref(ptr)
+        unsafe { &*self.inner.get() }.get_data_ref(ptr)
     }
 }
