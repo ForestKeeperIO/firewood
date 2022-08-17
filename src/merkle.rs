@@ -58,6 +58,7 @@ impl EncodedPath {
     }
 }
 
+#[derive(Clone)]
 struct Data(Vec<u8>);
 
 struct BranchNode {
@@ -221,6 +222,131 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
             .map_err(MerkleError::Shale)
     }
 
+    fn split<'b>(
+        &self,
+        u_ref: &mut ObjRef<'b, Node>,
+        parent: Option<&mut (ObjRef<'b, Node>, u8)>,
+        rem_path: &[u8],
+        n_path: Vec<u8>,
+        n_value: Option<Data>,
+        val: Vec<u8>,
+        deleted: &mut Vec<ObjPtr<Node>>,
+        new_root: &mut Option<ObjPtr<Node>>,
+    ) -> Result<Option<Vec<u8>>, MerkleError> {
+        let u_ptr = u_ref.as_ptr();
+        let new_chd = match rem_path.iter().zip(n_path.iter()).position(|(a, b)| a != b) {
+            Some(idx) => {
+                // now we need to split
+                u_ref.write(
+                    |u| {
+                        *(match &mut u.inner {
+                            NodeType::Leaf(u) => &mut u.0,
+                            NodeType::Extension(u) => &mut u.0,
+                            _ => unreachable!(),
+                        }) = EncodedPath(n_path[idx + 1..].to_vec())
+                    },
+                    true,
+                    &self.wctx,
+                );
+                let leaf = Node {
+                    root_hash: Hash([0; 32]),
+                    inner: NodeType::Leaf(LeafNode(
+                        EncodedPath(rem_path[idx + 1..].to_vec()),
+                        Data(val),
+                    )),
+                };
+                let leaf_r = self.new_node(leaf)?;
+                let mut chd = [None; NBRANCH];
+                chd[rem_path[idx] as usize] = Some(leaf_r.as_ptr());
+                chd[n_path[idx] as usize] = Some(u_ptr);
+                let branch = Node {
+                    root_hash: Hash([0; 32]),
+                    inner: NodeType::Branch(BranchNode { chd, value: None }),
+                };
+                let branch_r = self.new_node(branch)?;
+                if idx > 0 {
+                    let ext = Node {
+                        root_hash: Hash([0; 32]),
+                        inner: NodeType::Extension(ExtNode(
+                            EncodedPath(rem_path[..idx].to_vec()),
+                            branch_r.as_ptr(),
+                        )),
+                    };
+                    self.new_node(ext)?
+                } else {
+                    branch_r
+                }
+            }
+            None => {
+                let (leaf_ptr, prefix, idx, v) = if rem_path.len() < n_path.len() {
+                    u_ref.write(
+                        |u| {
+                            *(match &mut u.inner {
+                                NodeType::Leaf(u) => &mut u.0,
+                                NodeType::Extension(u) => &mut u.0,
+                                _ => unreachable!(),
+                            }) = EncodedPath(n_path[rem_path.len() + 1..].to_vec())
+                        },
+                        true,
+                        &self.wctx,
+                    );
+                    (
+                        u_ref.as_ptr(),
+                        rem_path,
+                        n_path[rem_path.len()],
+                        Some(Data(val)),
+                    )
+                } else {
+                    if n_value.is_none() {
+                        // this case does not apply to an extension node, resume the tree walk
+                        return Ok(Some(val));
+                    }
+                    let leaf = Node {
+                        root_hash: Hash([0; 32]),
+                        inner: NodeType::Leaf(LeafNode(
+                            EncodedPath(rem_path[n_path.len() + 1..].to_vec()),
+                            Data(val),
+                        )),
+                    };
+                    let leaf_r = self.new_node(leaf)?;
+                    deleted.push(u_ptr);
+                    (
+                        leaf_r.as_ptr(),
+                        &n_path[..],
+                        rem_path[n_path.len()],
+                        n_value,
+                    )
+                };
+                let mut chd = [None; NBRANCH];
+                chd[idx as usize] = Some(leaf_ptr);
+                let branch = Node {
+                    root_hash: Hash([0; 32]),
+                    inner: NodeType::Branch(BranchNode { chd, value: v }),
+                };
+                let branch_r = self.new_node(branch)?;
+                let ext = Node {
+                    root_hash: Hash([0; 32]),
+                    inner: NodeType::Extension(ExtNode(
+                        EncodedPath(prefix.to_vec()),
+                        branch_r.as_ptr(),
+                    )),
+                };
+                self.new_node(ext)?
+            }
+        }
+        .as_ptr();
+        // observation: leaf/extension node can only be the child of a branch node
+        match parent {
+            Some((p_ref, idx)) => p_ref.write(
+                |p| p.inner.as_branch_mut().unwrap().chd[*idx as usize] = Some(new_chd),
+                true,
+                &self.wctx,
+            ),
+            None => *new_root = Some(new_chd),
+        }
+        Ok(None)
+    }
+
     fn insert_by_case<'b>(
         &self,
         parent: Option<&mut (ObjRef<'b, Node>, u8)>,
@@ -257,108 +383,36 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                 }
             },
             NodeType::Leaf(n) => {
-                // now we need to split
-                // observation: leaf node can only be the child of a branch node
-                // first look at the common prefix between `n` and the key
                 let n_path = n.0 .0.to_vec();
-                let rem_path = &chunks[i + 1..];
-                let u_ptr = u_ref.as_ptr();
-                let new_chd = match rem_path.iter().zip(n_path.iter()).position(|(a, b)| a != b) {
-                    Some(idx) => {
-                        u_ref.write(
-                            |u| {
-                                u.inner.as_leaf_mut().unwrap().0 =
-                                    EncodedPath(n_path[idx + 1..].to_vec())
-                            },
-                            true,
-                            &self.wctx,
-                        );
-                        let leaf = Node {
-                            root_hash: Hash([0; 32]),
-                            inner: NodeType::Leaf(LeafNode(
-                                EncodedPath(rem_path[idx + 1..].to_vec()),
-                                Data(val),
-                            )),
-                        };
-                        let leaf_r = self.new_node(leaf)?;
-                        let mut chd = [None; NBRANCH];
-                        chd[rem_path[idx] as usize] = Some(leaf_r.as_ptr());
-                        chd[n_path[idx] as usize] = Some(u_ptr);
-                        let branch = Node {
-                            root_hash: Hash([0; 32]),
-                            inner: NodeType::Branch(BranchNode { chd, value: None }),
-                        };
-                        let branch_r = self.new_node(branch)?;
-                        if idx > 0 {
-                            let ext = Node {
-                                root_hash: Hash([0; 32]),
-                                inner: NodeType::Extension(ExtNode(
-                                    EncodedPath(rem_path[..idx].to_vec()),
-                                    branch_r.as_ptr(),
-                                )),
-                            };
-                            self.new_node(ext)?
-                        } else {
-                            branch_r
-                        }
-                    }
-                    None => {
-                        let (leaf_ptr, prefix, idx, v) = if rem_path.len() < n_path.len() {
-                            u_ref.write(
-                                |u| {
-                                    u.inner.as_leaf_mut().unwrap().0 =
-                                        EncodedPath(n_path[rem_path.len() + 1..].to_vec())
-                                },
-                                true,
-                                &self.wctx,
-                            );
-                            (u_ref.as_ptr(), rem_path, n_path[rem_path.len()], val)
-                        } else {
-                            let leaf = Node {
-                                root_hash: Hash([0; 32]),
-                                inner: NodeType::Leaf(LeafNode(
-                                    EncodedPath(rem_path[n_path.len() + 1..].to_vec()),
-                                    Data(val),
-                                )),
-                            };
-                            let leaf_r = self.new_node(leaf)?;
-                            let v = n.1 .0.clone();
-                            deleted.push(u_ptr);
-                            (leaf_r.as_ptr(), &n_path[..], rem_path[n_path.len()], v)
-                        };
-                        let mut chd = [None; NBRANCH];
-                        chd[idx as usize] = Some(leaf_ptr);
-                        let branch = Node {
-                            root_hash: Hash([0; 32]),
-                            inner: NodeType::Branch(BranchNode {
-                                chd,
-                                value: Some(Data(v)),
-                            }),
-                        };
-                        let branch_r = self.new_node(branch)?;
-                        let ext = Node {
-                            root_hash: Hash([0; 32]),
-                            inner: NodeType::Extension(ExtNode(
-                                EncodedPath(prefix.to_vec()),
-                                branch_r.as_ptr(),
-                            )),
-                        };
-                        self.new_node(ext)?
-                    }
-                }
-                .as_ptr();
-                match parent {
-                    Some((p_ref, idx)) => p_ref.write(
-                        |p| p.inner.as_branch_mut().unwrap().chd[*idx as usize] = Some(new_chd),
-                        true,
-                        &self.wctx,
-                    ),
-                    None => *new_root = Some(new_chd),
-                }
+                let n_value = Some(n.1.clone());
+                self.split(
+                    u_ref,
+                    parent,
+                    &chunks[i + 1..],
+                    n_path,
+                    n_value,
+                    val,
+                    deleted,
+                    new_root,
+                )?;
                 return Ok(None);
             }
             NodeType::Extension(n) => {
-                unreachable!()
+                let n_path = n.0 .0.to_vec();
+                let n_ptr = n.1;
+                if let Some(val) = self.split(
+                    u_ref,
+                    parent,
+                    &chunks[i + 1..],
+                    n_path,
+                    None,
+                    val,
+                    deleted,
+                    new_root,
+                )? {
+                    return Ok(Some((n_ptr, val)));
+                }
+                return Ok(None);
             }
         }
     }
