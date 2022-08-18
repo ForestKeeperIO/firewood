@@ -347,110 +347,91 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
         Ok(None)
     }
 
-    fn insert_by_case<'b>(
-        &self,
-        parent: Option<&mut (ObjRef<'b, Node>, u8)>,
-        u_ref: &mut ObjRef<'b, Node>,
-        i: usize,
-        nib: u8,
-        chunks: &[u8],
-        val: Vec<u8>,
-        deleted: &mut Vec<ObjPtr<Node>>,
-        new_root: &mut Option<ObjPtr<Node>>,
-    ) -> Result<Option<(ObjPtr<Node>, Vec<u8>)>, MerkleError> {
-        match &u_ref.inner {
-            NodeType::Branch(n) => match n.chd[nib as usize] {
-                Some(c) => return Ok(Some((c, val))),
-                None => {
-                    // create a leaf node
-                    let leaf = Node {
-                        root_hash: Hash([0; 32]),
-                        inner: NodeType::Leaf(LeafNode(
-                            EncodedPath(chunks[i + 1..].to_vec()),
-                            Data(val),
-                        )),
-                    };
-                    let leaf_r = self.new_node(leaf)?;
-                    u_ref.write(
-                        |u| {
-                            u.inner.as_branch_mut().unwrap().chd[nib as usize] =
-                                Some(leaf_r.as_ptr());
-                        },
-                        true,
-                        &self.wctx,
-                    );
-                    return Ok(None);
-                }
-            },
-            NodeType::Leaf(n) => {
-                let n_path = n.0 .0.to_vec();
-                let n_value = Some(n.1.clone());
-                self.split(
-                    u_ref,
-                    parent,
-                    &chunks[i + 1..],
-                    n_path,
-                    n_value,
-                    val,
-                    deleted,
-                    new_root,
-                )?;
-                return Ok(None);
-            }
-            NodeType::Extension(n) => {
-                let n_path = n.0 .0.to_vec();
-                let n_ptr = n.1;
-                if let Some(val) = self.split(
-                    u_ref,
-                    parent,
-                    &chunks[i + 1..],
-                    n_path,
-                    None,
-                    val,
-                    deleted,
-                    new_root,
-                )? {
-                    return Ok(Some((n_ptr, val)));
-                }
-                return Ok(None);
-            }
-        }
-    }
     pub fn insert(&mut self, key: &[u8], mut val: Vec<u8>) -> Result<(), MerkleError> {
         let mut deleted = Vec::new();
+        let mut new_root = None;
         {
             let mut u_ref = self.get_node(self.m.header.borrow().root)?;
             let chunks: Vec<_> = to_nibbles(key).collect();
             let mut parent = None;
             for (i, nib) in chunks.iter().enumerate() {
-                let mut new_root = None;
-                match self.insert_by_case(
-                    parent.as_mut(),
-                    &mut u_ref,
-                    i,
-                    *nib,
-                    &chunks,
-                    val,
-                    &mut deleted,
-                    &mut new_root,
-                )? {
-                    Some((next_ptr, v)) => {
+                let next_ptr = match &u_ref.inner {
+                    NodeType::Branch(n) => match n.chd[*nib as usize] {
+                        Some(c) => Some(c),
+                        None => {
+                            // create a leaf node
+                            let leaf = Node {
+                                root_hash: Hash([0; 32]),
+                                inner: NodeType::Leaf(LeafNode(
+                                    EncodedPath(chunks[i + 1..].to_vec()),
+                                    Data(val),
+                                )),
+                            };
+                            let leaf_r = self.new_node(leaf)?;
+                            u_ref.write(
+                                |u| {
+                                    u.inner.as_branch_mut().unwrap().chd[*nib as usize] =
+                                        Some(leaf_r.as_ptr());
+                                },
+                                true,
+                                &self.wctx,
+                            );
+                            break;
+                        }
+                    },
+                    NodeType::Leaf(n) => {
+                        let n_path = n.0 .0.to_vec();
+                        let n_value = Some(n.1.clone());
+                        self.split(
+                            &mut u_ref,
+                            parent.as_mut(),
+                            &chunks[i + 1..],
+                            n_path,
+                            n_value,
+                            val,
+                            &mut deleted,
+                            &mut new_root,
+                        )?;
+                        break;
+                    }
+                    NodeType::Extension(n) => {
+                        let n_path = n.0 .0.to_vec();
+                        let n_ptr = n.1;
+                        if let Some(v) = self.split(
+                            &mut u_ref,
+                            parent.as_mut(),
+                            &chunks[i + 1..],
+                            n_path,
+                            None,
+                            val,
+                            &mut deleted,
+                            &mut new_root,
+                        )? {
+                            val = v;
+                            Some(n_ptr)
+                        } else {
+                            break;
+                        }
+                    }
+                };
+                match next_ptr {
+                    Some(next_ptr) => {
                         parent = Some((u_ref, *nib));
                         u_ref = self.get_node(next_ptr)?;
-                        val = v
                     }
                     None => {
-                        if let Some(nr) = new_root {
-                            self.m
-                                .header
-                                .borrow_mut()
-                                .write(|r| r.root = nr, true, &self.wctx);
-                        }
                         break;
                     }
                 }
             }
         }
+        if let Some(nr) = new_root {
+            self.m
+                .header
+                .borrow_mut()
+                .write(|r| r.root = nr, true, &self.wctx);
+        }
+
         for ptr in deleted.into_iter() {
             self.m
                 .store
