@@ -364,3 +364,5 @@ impl<T> MummyItem for ObjPtr<T> {
         }
     }
 }
+
+pub struct NaiveMemImage(Arc<Vec<u8>>);
