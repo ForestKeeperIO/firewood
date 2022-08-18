@@ -2,11 +2,11 @@ pub mod block;
 pub mod compact;
 mod util;
 
-use std::cell::RefCell;
+use std::cell::{RefCell, UnsafeCell};
 use std::fmt;
 use std::marker::PhantomData;
 use std::ops::Deref;
-use std::sync::Arc;
+use std::rc::Rc;
 
 #[derive(Debug)]
 pub enum ShaleError {
@@ -38,28 +38,27 @@ pub trait ShaleRef<T: ?Sized>: Deref<Target = T> {
     /// Write to the typed content.
     fn write(&mut self) -> &mut T;
     /// Returns if the typed content is memory-mapped (i.e., all changes through `write` are auto
-    /// reflected in the underlying [LinearMemImage]).
+    /// reflected in the underlying [LinearStore]).
     fn is_mem_mapped(&self) -> bool;
 }
 
 /// A handle that pins a portion of the linear memory image.
 pub trait LinearRef: Deref<Target = [u8]> {
     /// Returns the underlying linear in-memory store.
-    fn linear_memstore(&self) -> &Arc<dyn LinearMemImage>;
-    /// Get a sub-interval of the linear image.
-    fn slice(&self, offset: u64, length: u64) -> Box<dyn LinearRef>;
+    fn mem_image(&self) -> Box<dyn LinearStore>;
 }
 
 /// In-memory store that offers access for intervals from a linear byte space, which is usually
 /// backed by a cached/memory-mapped pool of the accessed intervals from its underlying linear
 /// persistent store. Reads could trigger disk reads, but writes will *only* be visible in memory
 /// (it does not write back to the disk).
-pub trait LinearMemImage {
+pub trait LinearStore {
     /// Returns a handle that pins the `length` of bytes starting from `offset` and makes them
     /// directly accessible.
     fn get_ref(&self, offset: u64, length: u64) -> Option<Box<dyn LinearRef>>;
-    /// Overwrite the `change` to the portion of the linear space starting at `offset`.
-    fn overwrite(&self, offset: u64, change: &[u8]);
+    /// Write the `change` to the portion of the linear space starting at `offset`. The change
+    /// should be immediately visible to all `LinearRef` associated to this linear space.
+    fn write(&self, offset: u64, change: &[u8]);
     /// Returns the identifier of this storage space.
     fn id(&self) -> SpaceID;
     ///// Grows the space by a specified number of bytes and returns the original size. Use 0 to get
@@ -69,7 +68,7 @@ pub trait LinearMemImage {
 
 /// Records a context of changes made to the [ShaleStore].
 pub struct WriteContext {
-    writes: RefCell<Vec<(DiskWrite, MemRollback, Arc<dyn LinearMemImage>)>>,
+    writes: RefCell<Vec<(DiskWrite, MemRollback, Box<dyn LinearStore>)>>,
 }
 
 impl WriteContext {
@@ -79,10 +78,8 @@ impl WriteContext {
         }
     }
 
-    fn add(
-        &self, dw: DiskWrite, mw: MemRollback, mem: Arc<dyn LinearMemImage>,
-    ) {
-        self.writes.borrow_mut().push((dw, mw, mem.clone()))
+    fn add(&self, dw: DiskWrite, mw: MemRollback, mem: Box<dyn LinearStore>) {
+        self.writes.borrow_mut().push((dw, mw, mem))
     }
 
     /// Returns an atomic group of writes that should be done by a persistent store to make
@@ -100,7 +97,7 @@ impl WriteContext {
     pub fn abort(self) {
         for (dw, mw, mem) in self.writes.into_inner() {
             if let MemRollback::Rollback(r) = mw {
-                mem.overwrite(dw.space_off, &r);
+                mem.write(dw.space_off, &r);
             }
         }
     }
@@ -201,10 +198,10 @@ impl<'a, T: ?Sized> ObjRef<'a, T> {
             MemRollback::NoRollback
         };
         modify(self.inner.write());
-        let lspace = self.inner.as_linear_ref().linear_memstore().clone();
+        let lspace = self.inner.as_linear_ref().mem_image();
         let new_value = self.inner.to_mem_image();
         if !self.inner.is_mem_mapped() {
-            lspace.overwrite(self.addr, &new_value);
+            lspace.write(self.addr, &new_value);
         }
         if new_value.len() == 0 {
             return
@@ -262,7 +259,7 @@ pub trait ShaleStore {
 pub trait MummyItem {
     fn dehydrate(&self) -> Vec<u8>;
     fn hydrate(
-        addr: u64, mem: &dyn LinearMemImage,
+        addr: u64, mem: &dyn LinearStore,
     ) -> Result<(u64, Self), ShaleError>
     where
         Self: Sized;
@@ -301,7 +298,7 @@ impl<T: MummyItem> ShaleRef<T> for MummyRef<T> {
 }
 
 impl<T: MummyItem> MummyRef<T> {
-    fn new(addr: u64, space: &dyn LinearMemImage) -> Result<Self, ShaleError> {
+    fn new(addr: u64, space: &dyn LinearStore) -> Result<Self, ShaleError> {
         let (length, decoded) = T::hydrate(addr, space)?;
         Ok(Self {
             decoded,
@@ -314,7 +311,7 @@ impl<T: MummyItem> MummyRef<T> {
 
 impl<T> MummyRef<T> {
     unsafe fn new_from_slice(
-        addr: u64, length: u64, decoded: T, space: &dyn LinearMemImage,
+        addr: u64, length: u64, decoded: T, space: &dyn LinearStore,
     ) -> Result<Self, ShaleError> {
         Ok(Self {
             decoded,
@@ -332,7 +329,7 @@ impl<T> MummyRef<T> {
             addr,
             length,
             decoded,
-            s.inner.as_linear_ref().linear_memstore().as_ref(),
+            s.inner.as_linear_ref().mem_image().as_ref(),
         )?);
         Ok(ObjRef {
             addr,
@@ -348,7 +345,7 @@ impl<T> MummyItem for ObjPtr<T> {
     }
 
     fn hydrate(
-        addr: u64, mem: &dyn LinearMemImage,
+        addr: u64, mem: &dyn LinearStore,
     ) -> Result<(u64, Self), ShaleError> {
         const SIZE: u64 = 8;
         let raw = mem
@@ -365,4 +362,59 @@ impl<T> MummyItem for ObjPtr<T> {
     }
 }
 
-pub struct NaiveMemImage(Arc<Vec<u8>>);
+#[derive(Clone)]
+pub struct PlainMem {
+    space: Rc<UnsafeCell<Vec<u8>>>,
+    id: SpaceID,
+}
+
+impl PlainMem {
+    fn get_space_mut(&self) -> &mut Vec<u8> {
+        unsafe { &mut *self.space.get() }
+    }
+}
+
+impl LinearStore for PlainMem {
+    fn get_ref(&self, offset: u64, length: u64) -> Option<Box<dyn LinearRef>> {
+        let offset = offset as usize;
+        let length = length as usize;
+        if offset + length > self.get_space_mut().len() {
+            None
+        } else {
+            Some(Box::new(PlainMemRef {
+                offset,
+                length,
+                mem: self.clone(),
+            }))
+        }
+    }
+
+    fn write(&self, offset: u64, change: &[u8]) {
+        let offset = offset as usize;
+        let length = change.len();
+        self.get_space_mut()[offset..offset + length].copy_from_slice(change)
+    }
+
+    fn id(&self) -> SpaceID {
+        self.id
+    }
+}
+
+pub struct PlainMemRef {
+    offset: usize,
+    length: usize,
+    mem: PlainMem,
+}
+
+impl Deref for PlainMemRef {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.mem.get_space_mut()[self.offset..self.offset + self.length]
+    }
+}
+
+impl LinearRef for PlainMemRef {
+    fn mem_image(&self) -> Box<dyn LinearStore> {
+        Box::new(self.mem.clone())
+    }
+}

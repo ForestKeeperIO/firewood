@@ -1,6 +1,6 @@
 use super::{
-    LinearMemImage, MummyItem, MummyRef, ObjPtr, ObjRef, ShaleError,
-    ShaleStore, WriteContext,
+    LinearStore, MummyItem, MummyRef, ObjPtr, ObjRef, ShaleError, ShaleStore,
+    WriteContext,
 };
 use std::cell::UnsafeCell;
 use std::mem::size_of;
@@ -26,7 +26,7 @@ impl CompactHeader {
 
 impl MummyItem for CompactHeader {
     fn hydrate(
-        addr: u64, mem: &dyn LinearMemImage,
+        addr: u64, mem: &dyn LinearStore,
     ) -> Result<(u64, Self), ShaleError> {
         let raw = mem
             .get_ref(addr, Self::MSIZE)
@@ -64,7 +64,7 @@ impl CompactFooter {
 
 impl MummyItem for CompactFooter {
     fn hydrate(
-        addr: u64, mem: &dyn LinearMemImage,
+        addr: u64, mem: &dyn LinearStore,
     ) -> Result<(u64, Self), ShaleError> {
         let raw = mem
             .get_ref(addr, Self::MSIZE)
@@ -93,7 +93,7 @@ impl CompactDescriptor {
 
 impl MummyItem for CompactDescriptor {
     fn hydrate(
-        addr: u64, mem: &dyn LinearMemImage,
+        addr: u64, mem: &dyn LinearStore,
     ) -> Result<(u64, Self), ShaleError> {
         let raw = mem
             .get_ref(addr, Self::MSIZE)
@@ -161,7 +161,7 @@ impl CompactSpaceHeader {
 
 impl MummyItem for CompactSpaceHeader {
     fn hydrate(
-        addr: u64, mem: &dyn LinearMemImage,
+        addr: u64, mem: &dyn LinearStore,
     ) -> Result<(u64, Self), ShaleError> {
         let raw = mem
             .get_ref(addr, Self::MSIZE)
@@ -199,7 +199,7 @@ struct ObjPtrField<T>(ObjPtr<T>);
 
 impl<T> MummyItem for ObjPtrField<T> {
     fn hydrate(
-        addr: u64, mem: &dyn LinearMemImage,
+        addr: u64, mem: &dyn LinearStore,
     ) -> Result<(u64, Self), ShaleError> {
         const SIZE: u64 = 8;
         let raw = mem
@@ -236,7 +236,7 @@ struct U64Field(u64);
 
 impl MummyItem for U64Field {
     fn hydrate(
-        addr: u64, mem: &dyn LinearMemImage,
+        addr: u64, mem: &dyn LinearStore,
     ) -> Result<(u64, Self), ShaleError> {
         const SIZE: u64 = 8;
         let raw = mem
@@ -266,8 +266,8 @@ impl std::ops::DerefMut for U64Field {
 }
 
 struct CompactSpaceInner {
-    meta_space: Box<dyn LinearMemImage>,
-    compact_space: Box<dyn LinearMemImage>,
+    meta_space: Box<dyn LinearStore>,
+    compact_space: Box<dyn LinearStore>,
     header: CompactSpaceHeaderSliced<'static>,
     alloc_max_walk: u64,
     regn_nbit: u64,
@@ -601,8 +601,7 @@ pub struct CompactSpace {
 
 impl CompactSpace {
     pub fn new(
-        meta_space: Box<dyn LinearMemImage>,
-        compact_space: Box<dyn LinearMemImage>,
+        meta_space: Box<dyn LinearStore>, compact_space: Box<dyn LinearStore>,
         header: ObjRef<'static, CompactSpaceHeader>, alloc_max_walk: u64,
         regn_nbit: u64,
     ) -> Result<Self, ShaleError> {

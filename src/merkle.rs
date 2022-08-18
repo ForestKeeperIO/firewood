@@ -1,6 +1,6 @@
 use enum_as_inner::EnumAsInner;
 use parking_lot::{Mutex, MutexGuard};
-use shale::{LinearMemImage, MummyItem, ObjPtr, ObjRef, ShaleError, ShaleStore, WriteContext};
+use shale::{LinearStore, MummyItem, ObjPtr, ObjRef, ShaleError, ShaleStore, WriteContext};
 use std::cell::RefCell;
 
 const NBRANCH: usize = 16;
@@ -19,7 +19,7 @@ impl std::ops::Deref for Hash {
 }
 
 impl MummyItem for Hash {
-    fn hydrate(addr: u64, mem: &dyn LinearMemImage) -> Result<(u64, Self), ShaleError> {
+    fn hydrate(addr: u64, mem: &dyn LinearStore) -> Result<(u64, Self), ShaleError> {
         const SIZE: u64 = 32;
         let raw = mem
             .get_ref(addr, SIZE)
@@ -132,7 +132,7 @@ impl Node {
 }
 
 impl MummyItem for Node {
-    fn hydrate(addr: u64, mem: &dyn LinearMemImage) -> Result<(u64, Self), ShaleError> {
+    fn hydrate(addr: u64, mem: &dyn LinearStore) -> Result<(u64, Self), ShaleError> {
         let dec_err = |_| ShaleError::DecodeError;
         let meta_raw = mem
             .get_ref(addr, 8 + 32)
