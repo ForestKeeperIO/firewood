@@ -369,6 +369,12 @@ pub struct PlainMem {
 }
 
 impl PlainMem {
+    pub fn new(size: usize, id: SpaceID) -> Self {
+        let mut space = Vec::new();
+        space.resize(size, 0);
+        let space = Rc::new(UnsafeCell::new(space));
+        Self { space, id }
+    }
     fn get_space_mut(&self) -> &mut Vec<u8> {
         unsafe { &mut *self.space.get() }
     }
@@ -400,7 +406,7 @@ impl LinearStore for PlainMem {
     }
 }
 
-pub struct PlainMemRef {
+struct PlainMemRef {
     offset: usize,
     length: usize,
     mem: PlainMem,

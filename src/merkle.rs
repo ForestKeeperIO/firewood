@@ -9,6 +9,7 @@ pub enum MerkleError {
     Shale(shale::ShaleError),
 }
 
+#[derive(PartialEq, Eq)]
 pub struct Hash([u8; 32]);
 
 impl std::ops::Deref for Hash {
@@ -36,6 +37,7 @@ pub struct MerkleHeader {
 }
 
 /// PartialPath keeps a list of nibbles to represent a path on the MPT.
+#[derive(PartialEq, Eq)]
 struct PartialPath(Vec<u8>);
 
 impl std::ops::Deref for PartialPath {
@@ -92,7 +94,7 @@ fn test_partial_path_encoding() {
     }
 }
 
-#[derive(Clone)]
+#[derive(PartialEq, Eq, Clone)]
 struct Data(Vec<u8>);
 
 impl std::ops::Deref for Data {
@@ -102,21 +104,25 @@ impl std::ops::Deref for Data {
     }
 }
 
+#[derive(PartialEq, Eq)]
 struct BranchNode {
     chd: [Option<ObjPtr<Node>>; NBRANCH],
     value: Option<Data>,
 }
 
+#[derive(PartialEq, Eq)]
 struct LeafNode(PartialPath, Data);
 
+#[derive(PartialEq, Eq)]
 struct ExtNode(PartialPath, ObjPtr<Node>);
 
+#[derive(PartialEq, Eq)]
 struct Node {
     root_hash: Hash,
     inner: NodeType,
 }
 
-#[derive(EnumAsInner)]
+#[derive(PartialEq, Eq, EnumAsInner)]
 enum NodeType {
     Branch(BranchNode),
     Leaf(LeafNode),
@@ -145,9 +151,10 @@ impl MummyItem for Node {
         // values are used in place of hashes to refer to a child node.
 
         let rlp_raw = mem
-            .get_ref(addr, len)
+            .get_ref(addr + 8 + 32, len)
             .ok_or(ShaleError::LinearMemStoreError)?;
         let items: Vec<Vec<u8>> = rlp::decode_list(&rlp_raw);
+
         if items.len() == NBRANCH + 1 {
             let mut chd = [None; NBRANCH];
             for (i, c) in items[..NBRANCH].iter().enumerate() {
@@ -232,15 +239,51 @@ impl MummyItem for Node {
 
 #[test]
 fn test_merkle_node_encoding() {
-    // TODO
-    let check = |node: Node, term: bool| {};
-    for node in [Node {
-        root_hash: Hash([0x0; 32]),
-        inner: NodeType::Leaf(LeafNode(
-            PartialPath(vec![0x1, 0x2, 0x3]),
-            Data(vec![0x4, 0x5]),
-        )),
-    }] {}
+    let check = |node: Node| {
+        let bytes = node.dehydrate();
+        let mem = shale::PlainMem::new(bytes.len(), 0x0);
+        mem.write(0, &bytes);
+        println!("{:?}", bytes);
+        let (size, node_) = Node::hydrate(0, &mem).unwrap();
+        assert_eq!(bytes.len(), size as usize);
+        assert!(node == node_);
+    };
+    let chd0 = [None; NBRANCH];
+    let mut chd1 = chd0;
+    for i in 0..NBRANCH / 2 {
+        chd1[i] = Some(unsafe { ObjPtr::new_from_addr(0xa) });
+    }
+    for node in [
+        Node {
+            root_hash: Hash([0x0; 32]),
+            inner: NodeType::Leaf(LeafNode(
+                PartialPath(vec![0x1, 0x2, 0x3]),
+                Data(vec![0x4, 0x5]),
+            )),
+        },
+        Node {
+            root_hash: Hash([0x1; 32]),
+            inner: NodeType::Extension(ExtNode(PartialPath(vec![0x1, 0x2, 0x3]), unsafe {
+                ObjPtr::new_from_addr(0x42)
+            })),
+        },
+        Node {
+            root_hash: Hash([0xf; 32]),
+            inner: NodeType::Branch(BranchNode {
+                chd: chd0,
+                value: Some(Data("hello, world!".as_bytes().to_vec())),
+            }),
+        },
+        Node {
+            root_hash: Hash([0xf; 32]),
+            inner: NodeType::Branch(BranchNode {
+                chd: chd1,
+                value: None,
+            }),
+        },
+    ] {
+        check(node)
+    }
 }
 
 pub struct MerkleInner<S: ShaleStore> {
