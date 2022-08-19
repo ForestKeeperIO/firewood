@@ -537,9 +537,16 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
         let mut deleted = Vec::new();
         let mut updated = Vec::new();
         let mut new_root = None;
-        {
-            let mut u_ref = self.get_node(self.m.header.borrow().root)?;
-            let chunks: Vec<_> = to_nibbles(key).collect();
+        let root = self.m.header.borrow().root;
+        let chunks: Vec<_> = to_nibbles(key).collect();
+        if root.is_null() {
+            // insert the leaf to the empty slot
+            new_root = Some(self.new_node(Node::new(
+                NodeType::Leaf(LeafNode(PartialPath(chunks.to_vec()), Data(val))),
+                &self.m.store,
+            ))?.as_ptr())
+        } else {
+            let mut u_ref = self.get_node(root)?;
             let mut parent = None;
             let mut nskip = 0;
             for (i, nib) in chunks.iter().enumerate() {
