@@ -1,6 +1,8 @@
 use enum_as_inner::EnumAsInner;
 use parking_lot::{Mutex, MutexGuard};
+use sha3::Digest;
 use shale::{LinearStore, MummyItem, ObjPtr, ObjRef, ShaleError, ShaleStore, WriteContext};
+
 use std::cell::RefCell;
 
 const NBRANCH: usize = 16;
@@ -110,11 +112,51 @@ struct BranchNode {
     value: Option<Data>,
 }
 
+impl BranchNode {
+    fn hash<S: ShaleStore>(&self, store: &S) -> Hash {
+        let mut items = Vec::new();
+        for c in self.chd.iter() {
+            items.push(match c {
+                Some(c) => store.get_item(*c).unwrap().root_hash.0.into(),
+                None => Vec::new(),
+            })
+        }
+        items.push(match &self.value {
+            Some(val) => val.to_vec(),
+            None => Vec::new(),
+        });
+        let rlp_encoded = rlp::encode_list::<Vec<u8>, _>(&items);
+        Hash(sha3::Keccak256::digest(rlp_encoded).into())
+    }
+}
+
 #[derive(PartialEq, Eq)]
 struct LeafNode(PartialPath, Data);
 
+impl LeafNode {
+    fn hash(&self) -> Hash {
+        let items = vec![
+            from_nibbles(&self.0.encode(true)).collect(),
+            self.1.to_vec(),
+        ];
+        let rlp_encoded = rlp::encode_list::<Vec<u8>, _>(&items);
+        Hash(sha3::Keccak256::digest(rlp_encoded).into())
+    }
+}
+
 #[derive(PartialEq, Eq)]
 struct ExtNode(PartialPath, ObjPtr<Node>);
+
+impl ExtNode {
+    fn hash<S: ShaleStore>(&self, store: &S) -> Hash {
+        let items: Vec<Vec<_>> = vec![
+            from_nibbles(&self.0.encode(false)).collect(),
+            store.get_item(self.1).unwrap().root_hash.0.into(),
+        ];
+        let rlp_encoded = rlp::encode_list::<Vec<u8>, _>(&items);
+        Hash(sha3::Keccak256::digest(rlp_encoded).into())
+    }
+}
 
 #[derive(PartialEq, Eq)]
 struct Node {
@@ -130,9 +172,12 @@ enum NodeType {
 }
 
 impl Node {
-    fn new(inner: NodeType) -> Self {
-        // TODO
-        let root_hash = Hash([0; 32]);
+    fn new<S: ShaleStore>(inner: NodeType, store: &S) -> Self {
+        let root_hash = match &inner {
+            NodeType::Leaf(n) => n.hash(),
+            NodeType::Extension(n) => n.hash(store),
+            NodeType::Branch(n) => n.hash(store),
+        };
         Self { root_hash, inner }
     }
 }
@@ -222,10 +267,13 @@ impl MummyItem for Node {
                 });
             }
             NodeType::Extension(n) => {
-                items = vec![n.0.encode(false), n.1.addr().to_le_bytes().to_vec()];
+                items = vec![
+                    from_nibbles(&n.0.encode(false)).collect(),
+                    n.1.addr().to_le_bytes().to_vec(),
+                ];
             }
             NodeType::Leaf(n) => {
-                items = vec![n.0.encode(true), n.1.to_vec()];
+                items = vec![from_nibbles(&n.0.encode(true)).collect(), n.1.to_vec()];
             }
         }
         let mut m = Vec::new();
@@ -318,6 +366,11 @@ fn to_nibbles<'a>(bytes: &'a [u8]) -> impl Iterator<Item = u8> + 'a {
         .flat_map(|b| [(b >> 4) & 0xf, b & 0xf].into_iter())
 }
 
+fn from_nibbles<'a>(nibbles: &'a [u8]) -> impl Iterator<Item = u8> + 'a {
+    assert!(nibbles.len() & 1 == 0);
+    nibbles.chunks_exact(2).map(|p| (p[0] << 4) | p[1])
+}
+
 #[test]
 fn test_to_nibbles() {
     for (bytes, nibbles) in [
@@ -369,20 +422,28 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                     true,
                     &self.wctx,
                 );
-                let leaf = self.new_node(Node::new(NodeType::Leaf(LeafNode(
-                    PartialPath(rem_path[idx + 1..].to_vec()),
-                    Data(val),
-                ))))?;
+                let leaf = self.new_node(Node::new(
+                    NodeType::Leaf(LeafNode(
+                        PartialPath(rem_path[idx + 1..].to_vec()),
+                        Data(val),
+                    )),
+                    &self.m.store,
+                ))?;
                 let mut chd = [None; NBRANCH];
                 chd[rem_path[idx] as usize] = Some(leaf.as_ptr());
                 chd[n_path[idx] as usize] = Some(u_ptr);
-                let branch =
-                    self.new_node(Node::new(NodeType::Branch(BranchNode { chd, value: None })))?;
+                let branch = self.new_node(Node::new(
+                    NodeType::Branch(BranchNode { chd, value: None }),
+                    &self.m.store,
+                ))?;
                 if idx > 0 {
-                    self.new_node(Node::new(NodeType::Extension(ExtNode(
-                        PartialPath(rem_path[..idx].to_vec()),
-                        branch.as_ptr(),
-                    ))))?
+                    self.new_node(Node::new(
+                        NodeType::Extension(ExtNode(
+                            PartialPath(rem_path[..idx].to_vec()),
+                            branch.as_ptr(),
+                        )),
+                        &self.m.store,
+                    ))?
                 } else {
                     branch
                 }
@@ -413,22 +474,27 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                         // this case does not apply to an extension node, resume the tree walk
                         return Ok(Some(val));
                     }
-                    let leaf = self.new_node(Node::new(NodeType::Leaf(LeafNode(
-                        PartialPath(rem_path[n_path.len() + 1..].to_vec()),
-                        Data(val),
-                    ))))?;
+                    let leaf = self.new_node(Node::new(
+                        NodeType::Leaf(LeafNode(
+                            PartialPath(rem_path[n_path.len() + 1..].to_vec()),
+                            Data(val),
+                        )),
+                        &self.m.store,
+                    ))?;
                     deleted.push(u_ptr);
                     (leaf.as_ptr(), &n_path[..], rem_path[n_path.len()], n_value)
                 };
                 // [parent] -> [ExtNode] -> [branch with v] -> [Leaf]
                 let mut chd = [None; NBRANCH];
                 chd[idx as usize] = Some(leaf_ptr);
-                let branch =
-                    self.new_node(Node::new(NodeType::Branch(BranchNode { chd, value: v })))?;
-                self.new_node(Node::new(NodeType::Extension(ExtNode(
-                    PartialPath(prefix.to_vec()),
-                    branch.as_ptr(),
-                ))))?
+                let branch = self.new_node(Node::new(
+                    NodeType::Branch(BranchNode { chd, value: v }),
+                    &self.m.store,
+                ))?;
+                self.new_node(Node::new(
+                    NodeType::Extension(ExtNode(PartialPath(prefix.to_vec()), branch.as_ptr())),
+                    &self.m.store,
+                ))?
             }
         }
         .as_ptr();
@@ -462,10 +528,13 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                         Some(c) => Some(c),
                         None => {
                             // insert the leaf to the empty slot
-                            let leaf = self.new_node(Node::new(NodeType::Leaf(LeafNode(
-                                PartialPath(chunks[i + 1..].to_vec()),
-                                Data(val),
-                            ))))?;
+                            let leaf = self.new_node(Node::new(
+                                NodeType::Leaf(LeafNode(
+                                    PartialPath(chunks[i + 1..].to_vec()),
+                                    Data(val),
+                                )),
+                                &self.m.store,
+                            ))?;
                             u_ref.write(
                                 |u| {
                                     u.inner.as_branch_mut().unwrap().chd[*nib as usize] =
@@ -539,4 +608,16 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
         }
         Ok(())
     }
+}
+
+#[test]
+fn test_root_hash() {
+    let key0 = hex::decode("aa").unwrap();
+    let val0 = hex::decode("00").unwrap();
+    let v: Vec<(Vec<u8>, Vec<u8>)> = vec![(key0.clone(), val0.clone())];
+
+    println!(
+        "{}",
+        hex::encode(&*LeafNode(PartialPath(to_nibbles(&key0).collect()), Data(val0)).hash())
+    );
 }
