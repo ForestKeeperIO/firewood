@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 pub fn get_raw_bytes<T: Sized>(data: &T) -> Vec<u8> {
     unsafe {
         std::slice::from_raw_parts(

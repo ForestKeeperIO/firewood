@@ -7,6 +7,7 @@ use std::cell::RefCell;
 
 const NBRANCH: usize = 16;
 
+#[derive(Debug)]
 pub enum MerkleError {
     Shale(shale::ShaleError),
 }
@@ -413,11 +414,18 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                 //                                                    \_ [leaf (with val)]
                 u_ref.write(
                     |u| {
-                        *(match &mut u.inner {
-                            NodeType::Leaf(u) => &mut u.0,
-                            NodeType::Extension(u) => &mut u.0,
+                        let path = PartialPath(n_path[idx + 1..].to_vec());
+                        u.root_hash = match &mut u.inner {
+                            NodeType::Leaf(u) => {
+                                u.0 = path;
+                                u.hash()
+                            }
+                            NodeType::Extension(u) => {
+                                u.0 = path;
+                                u.hash(&self.m.store)
+                            }
                             _ => unreachable!(),
-                        }) = PartialPath(n_path[idx + 1..].to_vec())
+                        }
                     },
                     true,
                     &self.wctx,
@@ -453,11 +461,18 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                     // key path is a prefix of the path to u
                     u_ref.write(
                         |u| {
-                            *(match &mut u.inner {
-                                NodeType::Leaf(u) => &mut u.0,
-                                NodeType::Extension(u) => &mut u.0,
+                            let path = PartialPath(n_path[rem_path.len() + 1..].to_vec());
+                            u.root_hash = match &mut u.inner {
+                                NodeType::Leaf(u) => {
+                                    u.0 = path;
+                                    u.hash()
+                                }
+                                NodeType::Extension(u) => {
+                                    u.0 = path;
+                                    u.hash(&self.m.store)
+                                }
                                 _ => unreachable!(),
-                            }) = PartialPath(n_path[rem_path.len() + 1..].to_vec())
+                            }
                         },
                         true,
                         &self.wctx,
@@ -498,10 +513,18 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
             }
         }
         .as_ptr();
-        // observation: leaf/extension node can only be the child of a branch node
+        // observation:
+        // - leaf/extension node can only be the child of a branch node
+        // - branch node can only be the child of a branch/extension node
         match parent {
             Some((p_ref, idx)) => p_ref.write(
-                |p| p.inner.as_branch_mut().unwrap().chd[*idx as usize] = Some(new_chd),
+                |p| {
+                    p.root_hash = {
+                        let pp = p.inner.as_branch_mut().unwrap();
+                        pp.chd[*idx as usize] = Some(new_chd);
+                        pp.hash(&self.m.store)
+                    }
+                },
                 true,
                 &self.wctx,
             ),
@@ -512,6 +535,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
 
     pub fn insert(&mut self, key: &[u8], mut val: Vec<u8>) -> Result<(), MerkleError> {
         let mut deleted = Vec::new();
+        let mut updated = Vec::new();
         let mut new_root = None;
         {
             let mut u_ref = self.get_node(self.m.header.borrow().root)?;
@@ -525,7 +549,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                 }
                 let next_ptr = match &u_ref.inner {
                     NodeType::Branch(n) => match n.chd[*nib as usize] {
-                        Some(c) => Some(c),
+                        Some(c) => c,
                         None => {
                             // insert the leaf to the empty slot
                             let leaf = self.new_node(Node::new(
@@ -537,8 +561,11 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                             ))?;
                             u_ref.write(
                                 |u| {
-                                    u.inner.as_branch_mut().unwrap().chd[*nib as usize] =
-                                        Some(leaf.as_ptr());
+                                    u.root_hash = {
+                                        let uu = u.inner.as_branch_mut().unwrap();
+                                        uu.chd[*nib as usize] = Some(leaf.as_ptr());
+                                        uu.hash(&self.m.store)
+                                    }
                                 },
                                 true,
                                 &self.wctx,
@@ -576,23 +603,33 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                             &mut new_root,
                         )? {
                             val = v;
-                            Some(n_ptr)
+                            n_ptr
                         } else {
                             break;
                         }
                     }
                 };
-                match next_ptr {
-                    Some(next_ptr) => {
-                        parent = Some((u_ref, *nib));
-                        u_ref = self.get_node(next_ptr)?;
-                    }
-                    None => {
-                        break;
-                    }
-                }
+
+                updated.push(u_ref.as_ptr());
+                parent = Some((u_ref, *nib));
+                u_ref = self.get_node(next_ptr)?;
             }
         }
+
+        for ptr in updated.into_iter() {
+            self.get_node(ptr).unwrap().write(
+                |u| {
+                    u.root_hash = match &mut u.inner {
+                        NodeType::Branch(n) => n.hash(&self.m.store),
+                        NodeType::Extension(n) => n.hash(&self.m.store),
+                        _ => unreachable!(),
+                    }
+                },
+                true,
+                &self.wctx,
+            );
+        }
+
         if let Some(nr) = new_root {
             self.m
                 .header

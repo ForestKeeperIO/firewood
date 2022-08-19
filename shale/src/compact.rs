@@ -3,7 +3,6 @@ use super::{
     WriteContext,
 };
 use std::cell::UnsafeCell;
-use std::mem::size_of;
 
 struct CompactHeader {
     payload_size: u64,
