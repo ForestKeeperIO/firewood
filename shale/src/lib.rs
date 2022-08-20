@@ -424,3 +424,14 @@ impl LinearRef for PlainMemRef {
         Box::new(self.mem.clone())
     }
 }
+
+pub unsafe fn get_obj_ref<'a, T: 'a + MummyItem>(
+    store: &'a Box<dyn LinearStore>, ptr: ObjPtr<T>, space_id: SpaceID,
+) -> Result<ObjRef<'a, T>, ShaleError> {
+    let addr = ptr.addr();
+    Ok(ObjRef::from_shale(
+        addr,
+        space_id,
+        Box::new(MummyRef::new(addr, store.as_ref())?),
+    ))
+}

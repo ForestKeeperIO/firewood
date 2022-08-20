@@ -134,6 +134,17 @@ struct CompactSpaceHeaderSliced<'a> {
 impl CompactSpaceHeader {
     const MSIZE: u64 = 32;
 
+    pub fn new(meta_base: u64, compact_base: u64) -> Self {
+        unsafe {
+            Self {
+                meta_space_tail: meta_base,
+                compact_space_tail: compact_base,
+                base_addr: ObjPtr::new_from_addr(meta_base),
+                alloc_addr: ObjPtr::new_from_addr(meta_base),
+            }
+        }
+    }
+
     fn into_fields<'a>(
         r: ObjRef<'a, Self>,
     ) -> Result<CompactSpaceHeaderSliced<'a>, ShaleError> {
@@ -273,30 +284,24 @@ struct CompactSpaceInner {
 }
 
 impl CompactSpaceInner {
-    fn get_meta_ref<'a>(
+    fn get_descriptor<'a>(
         &'a self, ptr: ObjPtr<CompactDescriptor>,
     ) -> Result<ObjRef<'a, CompactDescriptor>, ShaleError> {
-        let addr = ptr.addr();
-        Ok(unsafe {
-            ObjRef::from_shale(
-                addr,
-                self.meta_space.id(),
-                Box::new(MummyRef::new(addr, self.meta_space.as_ref())?),
-            )
-        })
+        unsafe {
+            super::get_obj_ref(&self.meta_space, ptr, self.meta_space.id())
+        }
     }
 
     fn get_data_ref<'a, T: MummyItem + 'a>(
         &'a self, ptr: ObjPtr<T>,
     ) -> Result<ObjRef<'a, T>, ShaleError> {
-        let addr = ptr.addr();
-        Ok(unsafe {
-            ObjRef::from_shale(
-                addr,
+        unsafe {
+            super::get_obj_ref(
+                &self.compact_space,
+                ptr,
                 self.compact_space.id(),
-                Box::new(MummyRef::new(addr, self.compact_space.as_ref())?),
             )
-        })
+        }
     }
 
     fn del_desc(
@@ -310,10 +315,10 @@ impl CompactSpaceInner {
             .meta_space_tail
             .write(|r| **r -= desc_size, true, wctx);
         if desc_addr.addr + desc_size != **self.header.meta_space_tail {
-            let desc_last = self.get_meta_ref(unsafe {
+            let desc_last = self.get_descriptor(unsafe {
                 ObjPtr::new_from_addr(**self.header.meta_space_tail)
             })?;
-            let mut desc = self.get_meta_ref(unsafe {
+            let mut desc = self.get_descriptor(unsafe {
                 ObjPtr::new_from_addr(desc_addr.addr)
             })?;
             desc.write(|r| *r = *desc_last, true, wctx);
@@ -410,7 +415,7 @@ impl CompactSpaceInner {
 
         let desc_addr = self.new_desc(wctx)?;
         {
-            let mut desc = self.get_meta_ref(desc_addr)?;
+            let mut desc = self.get_descriptor(desc_addr)?;
             desc.write(
                 |d| {
                     d.payload_size = payload_size;
@@ -460,7 +465,7 @@ impl CompactSpaceInner {
             let desc_payload_size;
             let desc_haddr;
             {
-                let desc = self.get_meta_ref(ptr)?;
+                let desc = self.get_descriptor(ptr)?;
                 desc_payload_size = desc.payload_size;
                 desc_haddr = desc.haddr;
             }
@@ -503,7 +508,7 @@ impl CompactSpaceInner {
                 let rpayload_size = desc_payload_size - length - fsize - hsize;
                 let rdesc_addr = self.new_desc(wctx)?;
                 {
-                    let mut rdesc = self.get_meta_ref(rdesc_addr)?;
+                    let mut rdesc = self.get_descriptor(rdesc_addr)?;
                     rdesc.write(
                         |rd| {
                             rd.payload_size = rpayload_size;

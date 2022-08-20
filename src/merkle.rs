@@ -39,6 +39,34 @@ pub struct MerkleHeader {
     root: ObjPtr<Node>,
 }
 
+impl MerkleHeader {
+    const MSIZE: u64 = 8;
+}
+
+impl MummyItem for MerkleHeader {
+    fn hydrate(addr: u64, mem: &dyn LinearStore) -> Result<(u64, Self), ShaleError> {
+        let raw = mem
+            .get_ref(addr, Self::MSIZE)
+            .ok_or(ShaleError::LinearMemStoreError)?;
+        let root = u64::from_le_bytes(raw[..8].try_into().unwrap());
+        unsafe {
+            Ok((
+                Self::MSIZE,
+                Self {
+                    root: ObjPtr::new_from_addr(root),
+                },
+            ))
+        }
+    }
+
+    fn dehydrate(&self) -> Vec<u8> {
+        let mut m = Vec::new();
+        m.extend(self.root.addr().to_le_bytes());
+        assert_eq!(m.len() as u64, Self::MSIZE);
+        m
+    }
+}
+
 /// PartialPath keeps a list of nibbles to represent a path on the MPT.
 #[derive(PartialEq, Eq)]
 struct PartialPath(Vec<u8>);
@@ -335,7 +363,7 @@ fn test_merkle_node_encoding() {
     }
 }
 
-pub struct MerkleInner<S: ShaleStore> {
+struct MerkleInner<S: ShaleStore> {
     header: RefCell<ObjRef<'static, MerkleHeader>>,
     store: S,
 }
@@ -541,10 +569,13 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
         let chunks: Vec<_> = to_nibbles(key).collect();
         if root.is_null() {
             // insert the leaf to the empty slot
-            new_root = Some(self.new_node(Node::new(
-                NodeType::Leaf(LeafNode(PartialPath(chunks.to_vec()), Data(val))),
-                &self.m.store,
-            ))?.as_ptr())
+            new_root = Some(
+                self.new_node(Node::new(
+                    NodeType::Leaf(LeafNode(PartialPath(chunks.to_vec()), Data(val))),
+                    &self.m.store,
+                ))?
+                .as_ptr(),
+            )
         } else {
             let mut u_ref = self.get_node(root)?;
             let mut parent = None;
@@ -664,4 +695,30 @@ fn test_root_hash() {
         "{}",
         hex::encode(&*LeafNode(PartialPath(to_nibbles(&key0).collect()), Data(val0)).hash())
     );
+
+    let mem_meta = Box::new(shale::PlainMem::new(0x10000, 0x0)) as Box<dyn LinearStore>;
+    let mem_payload = Box::new(shale::PlainMem::new(0x10000, 0x1));
+    let compact_header: ObjPtr<shale::compact::CompactSpaceHeader> =
+        unsafe { ObjPtr::new_from_addr(0x0) };
+    let merkle_header: ObjPtr<MerkleHeader> = unsafe { ObjPtr::new_from_addr(0x100) };
+
+    mem_meta.write(
+        compact_header.addr(),
+        &shale::compact::CompactSpaceHeader::new(0x1000, 0x1000).dehydrate(),
+    );
+    mem_meta.write(
+        merkle_header.addr(),
+        &MerkleHeader {
+            root: ObjPtr::null(),
+        }
+        .dehydrate(),
+    );
+
+    let compact_header = unsafe {
+        shale::get_obj_ref(&mem_meta, compact_header, 0x0)
+            .unwrap()
+            .to_longlive()
+    };
+    let space =
+        shale::compact::CompactSpace::new(mem_meta, mem_payload, compact_header, 10, 16).unwrap();
 }
