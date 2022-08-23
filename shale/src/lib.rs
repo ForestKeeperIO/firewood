@@ -27,6 +27,20 @@ pub struct DiskWrite {
     pub data: Box<[u8]>,
 }
 
+impl std::fmt::Debug for DiskWrite {
+    fn fmt(
+        &self, f: &mut std::fmt::Formatter<'_>,
+    ) -> Result<(), std::fmt::Error> {
+        write!(
+            f,
+            "[Disk space=0x{:02x} offset=0x{:04x} data=0x{}",
+            self.space_id,
+            self.space_off,
+            hex::encode(&self.data)
+        )
+    }
+}
+
 /// A typed, readable handle for the stored item in [ShaleStore]. The object does not contain any
 /// addressing information (and is thus read-only) and just represents the decoded/mapped data.
 /// This should be implemented as part of [ShaleRefConverter::into_shale_ref].
@@ -38,21 +52,21 @@ pub trait ShaleRef<T: ?Sized>: Deref<Target = T> {
     /// Write to the typed content.
     fn write(&mut self) -> &mut T;
     /// Returns if the typed content is memory-mapped (i.e., all changes through `write` are auto
-    /// reflected in the underlying [LinearStore]).
+    /// reflected in the underlying [MemStore]).
     fn is_mem_mapped(&self) -> bool;
 }
 
 /// A handle that pins a portion of the linear memory image.
 pub trait LinearRef: Deref<Target = [u8]> {
     /// Returns the underlying linear in-memory store.
-    fn mem_image(&self) -> Box<dyn LinearStore>;
+    fn mem_image(&self) -> Box<dyn MemStore>;
 }
 
 /// In-memory store that offers access for intervals from a linear byte space, which is usually
 /// backed by a cached/memory-mapped pool of the accessed intervals from its underlying linear
 /// persistent store. Reads could trigger disk reads, but writes will *only* be visible in memory
 /// (it does not write back to the disk).
-pub trait LinearStore {
+pub trait MemStore {
     /// Returns a handle that pins the `length` of bytes starting from `offset` and makes them
     /// directly accessible.
     fn get_ref(&self, offset: u64, length: u64) -> Option<Box<dyn LinearRef>>;
@@ -68,7 +82,7 @@ pub trait LinearStore {
 
 /// Records a context of changes made to the [ShaleStore].
 pub struct WriteContext {
-    writes: RefCell<Vec<(DiskWrite, MemRollback, Box<dyn LinearStore>)>>,
+    writes: RefCell<Vec<(DiskWrite, MemRollback, Box<dyn MemStore>)>>,
 }
 
 impl WriteContext {
@@ -78,7 +92,7 @@ impl WriteContext {
         }
     }
 
-    fn add(&self, dw: DiskWrite, mw: MemRollback, mem: Box<dyn LinearStore>) {
+    fn add(&self, dw: DiskWrite, mw: MemRollback, mem: Box<dyn MemStore>) {
         self.writes.borrow_mut().push((dw, mw, mem))
     }
 
@@ -163,7 +177,7 @@ impl<T> std::hash::Hash for ObjPtr<T> {
 
 /// Handle offers read & write access to the stored [ShaleStore] item.
 pub struct ObjRef<'a, T: ?Sized> {
-    addr: u64,
+    addr_: u64,
     space_id: SpaceID,
     inner: Box<dyn ShaleRef<T> + 'a>,
 }
@@ -171,13 +185,13 @@ pub struct ObjRef<'a, T: ?Sized> {
 impl<'a, T: ?Sized> ObjRef<'a, T> {
     #[inline(always)]
     pub fn as_ptr(&self) -> ObjPtr<T> {
-        ObjPtr::<T>::new(self.addr)
+        ObjPtr::<T>::new(self.addr_)
     }
 
     pub unsafe fn to_longlive(self) -> ObjRef<'static, T> {
         let inner = Box::into_raw(self.inner);
         ObjRef {
-            addr: self.addr,
+            addr_: self.addr_,
             space_id: self.space_id,
             inner: Box::from_raw(std::mem::transmute::<
                 *mut (dyn ShaleRef<T> + 'a),
@@ -201,13 +215,13 @@ impl<'a, T: ?Sized> ObjRef<'a, T> {
         let lspace = self.inner.as_linear_ref().mem_image();
         let new_value = self.inner.to_mem_image();
         if !self.inner.is_mem_mapped() {
-            lspace.write(self.addr, &new_value);
+            lspace.write(self.addr_, &new_value);
         }
         if new_value.len() == 0 {
             return
         }
         let dw = DiskWrite {
-            space_off: self.addr,
+            space_off: self.addr_,
             space_id: self.space_id,
             data: new_value,
         };
@@ -219,10 +233,10 @@ impl<'a, T: ?Sized> ObjRef<'a, T> {
     }
 
     pub unsafe fn from_shale(
-        addr: u64, space_id: SpaceID, r: Box<dyn ShaleRef<T> + 'a>,
+        addr_: u64, space_id: SpaceID, r: Box<dyn ShaleRef<T> + 'a>,
     ) -> Self {
         ObjRef {
-            addr,
+            addr_,
             space_id,
             inner: r,
         }
@@ -259,7 +273,7 @@ pub trait ShaleStore {
 pub trait MummyItem {
     fn dehydrate(&self) -> Vec<u8>;
     fn hydrate(
-        addr: u64, mem: &dyn LinearStore,
+        addr: u64, mem: &dyn MemStore,
     ) -> Result<(u64, Self), ShaleError>
     where
         Self: Sized;
@@ -298,8 +312,16 @@ impl<T: MummyItem> ShaleRef<T> for MummyRef<T> {
 }
 
 impl<T: MummyItem> MummyRef<T> {
-    fn new(addr: u64, space: &dyn LinearStore) -> Result<Self, ShaleError> {
+    fn new(addr: u64, space: &dyn MemStore) -> Result<Self, ShaleError> {
         let (length, decoded) = T::hydrate(addr, space)?;
+        Ok(Self {
+            decoded,
+            raw: space
+                .get_ref(addr, length)
+                .ok_or(ShaleError::LinearMemStoreError)?,
+        })
+    }
+    fn from_hydrated(addr: u64, length: u64, decoded: T, space: &dyn MemStore) -> Result<Self, ShaleError> {
         Ok(Self {
             decoded,
             raw: space
@@ -311,7 +333,7 @@ impl<T: MummyItem> MummyRef<T> {
 
 impl<T> MummyRef<T> {
     unsafe fn new_from_slice(
-        addr: u64, length: u64, decoded: T, space: &dyn LinearStore,
+        addr: u64, length: u64, decoded: T, space: &dyn MemStore,
     ) -> Result<Self, ShaleError> {
         Ok(Self {
             decoded,
@@ -324,15 +346,15 @@ impl<T> MummyRef<T> {
     pub unsafe fn slice<'b, U: MummyItem + 'b>(
         s: &ObjRef<'b, T>, offset: u64, length: u64, decoded: U,
     ) -> Result<ObjRef<'b, U>, ShaleError> {
-        let addr = s.addr + offset;
+        let addr_ = s.addr_ + offset;
         let r = Box::new(MummyRef::new_from_slice(
-            addr,
+            addr_,
             length,
             decoded,
             s.inner.as_linear_ref().mem_image().as_ref(),
         )?);
         Ok(ObjRef {
-            addr,
+            addr_,
             space_id: s.space_id,
             inner: r,
         })
@@ -345,7 +367,7 @@ impl<T> MummyItem for ObjPtr<T> {
     }
 
     fn hydrate(
-        addr: u64, mem: &dyn LinearStore,
+        addr: u64, mem: &dyn MemStore,
     ) -> Result<(u64, Self), ShaleError> {
         const SIZE: u64 = 8;
         let raw = mem
@@ -380,7 +402,7 @@ impl PlainMem {
     }
 }
 
-impl LinearStore for PlainMem {
+impl MemStore for PlainMem {
     fn get_ref(&self, offset: u64, length: u64) -> Option<Box<dyn LinearRef>> {
         let offset = offset as usize;
         let length = length as usize;
@@ -420,18 +442,28 @@ impl Deref for PlainMemRef {
 }
 
 impl LinearRef for PlainMemRef {
-    fn mem_image(&self) -> Box<dyn LinearStore> {
+    fn mem_image(&self) -> Box<dyn MemStore> {
         Box::new(self.mem.clone())
     }
 }
 
 pub unsafe fn get_obj_ref<'a, T: 'a + MummyItem>(
-    store: &'a Box<dyn LinearStore>, ptr: ObjPtr<T>, space_id: SpaceID,
+    store: &'a Box<dyn MemStore>, ptr: ObjPtr<T>,
 ) -> Result<ObjRef<'a, T>, ShaleError> {
     let addr = ptr.addr();
     Ok(ObjRef::from_shale(
         addr,
-        space_id,
+        store.id(),
         Box::new(MummyRef::new(addr, store.as_ref())?),
+    ))
+}
+
+pub unsafe fn obj_ref_from_item<'a, T: 'a + MummyItem>(
+    store: &'a Box<dyn MemStore>, addr: u64, length: u64, decoded: T,
+) -> Result<ObjRef<'a, T>, ShaleError> {
+    Ok(ObjRef::from_shale(
+        addr,
+        store.id(),
+        Box::new(MummyRef::from_hydrated(addr, length, decoded, store.as_ref())?),
     ))
 }
