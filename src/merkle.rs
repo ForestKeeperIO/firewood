@@ -818,7 +818,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                 let u_ptr = u_ref.as_ptr();
                 u_ref.write(
                     |u| {
-                        if let Some(path) = match &mut u.inner {
+                        if let Some((path, ext)) = match &mut u.inner {
                             NodeType::Branch(n) => {
                                 n.value = Some(Data(val.take().unwrap()));
                                 None
@@ -828,14 +828,20 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                                     n.1 = Data(val.take().unwrap());
                                     None
                                 } else {
-                                    Some(&mut n.0)
+                                    Some((&mut n.0, None))
                                 }
                             }
-                            NodeType::Extension(n) => Some(&mut n.0),
+                            NodeType::Extension(n) => Some((&mut n.0, Some(n.1))),
                         } {
                             let mut chd = [None; NBRANCH];
-                            chd[path[0] as usize] = Some(u_ptr);
-                            *path = PartialPath(path[1..].to_vec());
+                            let c_ptr = if path.len() > 1 || ext.is_none() {
+                                *path = PartialPath(path[1..].to_vec());
+                                u_ptr
+                            } else {
+                                deleted.push(u_ptr);
+                                ext.unwrap()
+                            };
+                            chd[path[0] as usize] = Some(c_ptr);
                             let branch = self
                                 .new_node(Node::new(
                                     NodeType::Branch(BranchNode {
