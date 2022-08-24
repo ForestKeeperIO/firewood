@@ -48,7 +48,7 @@ pub trait ShaleRef<T: ?Sized>: Deref<Target = T> {
     /// Access it as a [LinearRef] object.
     fn as_linear_ref(&self) -> &dyn LinearRef;
     /// Defines how the current in-memory object of `T` should be represented in the linear storage space.
-    fn to_mem_image(&self) -> Box<[u8]>;
+    fn to_mem_image(&self) -> Option<Box<[u8]>>;
     /// Write to the typed content.
     fn write(&mut self) -> &mut T;
     /// Returns if the typed content is memory-mapped (i.e., all changes through `write` are auto
@@ -202,30 +202,32 @@ impl<'a, T: ?Sized> ObjRef<'a, T> {
 }
 
 impl<'a, T: ?Sized> ObjRef<'a, T> {
+    /// Write to the underlying object. Returns `Some(())` on success.
     pub fn write(
         &mut self, modify: impl FnOnce(&mut T) -> (), mem_rollback: bool,
         wctx: &WriteContext,
-    ) {
+    ) -> Option<()> {
         let mw = if mem_rollback {
-            MemRollback::Rollback(self.inner.to_mem_image())
+            MemRollback::Rollback(self.inner.to_mem_image()?)
         } else {
             MemRollback::NoRollback
         };
         modify(self.inner.write());
         let lspace = self.inner.as_linear_ref().mem_image();
-        let new_value = self.inner.to_mem_image();
+        let new_value = self.inner.to_mem_image()?;
         if !self.inner.is_mem_mapped() {
             lspace.write(self.addr_, &new_value);
         }
         if new_value.len() == 0 {
-            return
+            return Some(())
         }
         let dw = DiskWrite {
             space_off: self.addr_,
             space_id: self.space_id,
             data: new_value,
         };
-        wctx.add(dw, mw, lspace)
+        wctx.add(dw, mw, lspace);
+        Some(())
     }
 
     pub fn get_space_id(&self) -> SpaceID {
@@ -287,6 +289,7 @@ pub trait MummyItem {
 pub struct MummyRef<T> {
     decoded: T,
     raw: Box<dyn LinearRef>,
+    len_limit: u64,
 }
 
 impl<T> Deref for MummyRef<T> {
@@ -300,8 +303,13 @@ impl<T: MummyItem> ShaleRef<T> for MummyRef<T> {
     fn as_linear_ref(&self) -> &dyn LinearRef {
         &*self.raw
     }
-    fn to_mem_image(&self) -> Box<[u8]> {
-        self.decoded.dehydrate().into()
+    fn to_mem_image(&self) -> Option<Box<[u8]>> {
+        let mem: Box<[u8]> = self.decoded.dehydrate().into();
+        if mem.len() as u64 > self.len_limit {
+            None
+        } else {
+            Some(mem)
+        }
     }
     fn write(&mut self) -> &mut T {
         &mut self.decoded
@@ -319,27 +327,30 @@ impl<T: MummyItem> MummyRef<T> {
             raw: space
                 .get_ref(addr, length)
                 .ok_or(ShaleError::LinearMemStoreError)?,
+            len_limit: length,
         })
     }
-    fn from_hydrated(addr: u64, length: u64, decoded: T, space: &dyn MemStore) -> Result<Self, ShaleError> {
+    fn from_hydrated(addr: u64, length: u64, len_limit: u64, decoded: T, space: &dyn MemStore) -> Result<Self, ShaleError> {
         Ok(Self {
             decoded,
             raw: space
                 .get_ref(addr, length)
                 .ok_or(ShaleError::LinearMemStoreError)?,
+            len_limit,
         })
     }
 }
 
 impl<T> MummyRef<T> {
     unsafe fn new_from_slice(
-        addr: u64, length: u64, decoded: T, space: &dyn MemStore,
+        addr: u64, length: u64, len_limit: u64, decoded: T, space: &dyn MemStore,
     ) -> Result<Self, ShaleError> {
         Ok(Self {
             decoded,
             raw: space
                 .get_ref(addr, length)
                 .ok_or(ShaleError::LinearMemStoreError)?,
+            len_limit,
         })
     }
 
@@ -349,6 +360,7 @@ impl<T> MummyRef<T> {
         let addr_ = s.addr_ + offset;
         let r = Box::new(MummyRef::new_from_slice(
             addr_,
+            length,
             length,
             decoded,
             s.inner.as_linear_ref().mem_image().as_ref(),
@@ -458,11 +470,11 @@ pub unsafe fn get_obj_ref<'a, T: 'a + MummyItem>(
 }
 
 pub unsafe fn obj_ref_from_item<'a, T: 'a + MummyItem>(
-    store: &'a Box<dyn MemStore>, addr: u64, length: u64, decoded: T,
+    store: &'a Box<dyn MemStore>, addr: u64, length: u64, len_limit: u64, decoded: T,
 ) -> Result<ObjRef<'a, T>, ShaleError> {
     Ok(ObjRef::from_shale(
         addr,
         store.id(),
-        Box::new(MummyRef::from_hydrated(addr, length, decoded, store.as_ref())?),
+        Box::new(MummyRef::from_hydrated(addr, length, len_limit, decoded, store.as_ref())?),
     ))
 }
