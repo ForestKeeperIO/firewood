@@ -834,6 +834,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                             NodeType::Extension(n) => Some((&mut n.0, Some(n.1))),
                         } {
                             let mut chd = [None; NBRANCH];
+                            let idx = path[0] as usize;
                             let c_ptr = if path.len() > 1 || ext.is_none() {
                                 *path = PartialPath(path[1..].to_vec());
                                 u_ptr
@@ -841,7 +842,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                                 deleted.push(u_ptr);
                                 ext.unwrap()
                             };
-                            chd[path[0] as usize] = Some(c_ptr);
+                            chd[idx] = Some(c_ptr);
                             let branch = self
                                 .new_node(Node::new(
                                     NodeType::Branch(BranchNode {
@@ -997,7 +998,7 @@ fn test_root_hash_fuzz_insertions() {
     };
     for _ in 0..10000 {
         let mut items = Vec::new();
-        for _ in 0..10 {
+        for _ in 0..100 {
             let val: Vec<u8> = (0..32).map(|_| rng.borrow_mut().gen()).collect();
             items.push((keygen(), val));
         }
