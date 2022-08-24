@@ -895,6 +895,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
     }
 }
 
+#[cfg(test)]
 fn merkle_build_test<K: AsRef<[u8]> + std::cmp::Ord + Clone, V: AsRef<[u8]> + Clone>(
     items: Vec<(K, V)>,
     meta_size: u64,
@@ -996,13 +997,12 @@ fn test_root_hash_fuzz_insertions() {
             .collect();
         key
     };
-    for _ in 0..10000 {
+    for _ in 0..1000 {
         let mut items = Vec::new();
         for _ in 0..100 {
             let val: Vec<u8> = (0..32).map(|_| rng.borrow_mut().gen()).collect();
             items.push((keygen(), val));
         }
-        let (merkle, _) = merkle_build_test(items, 0x100000, 0x100000);
-        //merkle.dump();
+        merkle_build_test(items, 0x100000, 0x100000);
     }
 }
