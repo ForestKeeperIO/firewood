@@ -391,9 +391,9 @@ pub struct PlainMem {
 }
 
 impl PlainMem {
-    pub fn new(size: usize, id: SpaceID) -> Self {
+    pub fn new(size: u64, id: SpaceID) -> Self {
         let mut space = Vec::new();
-        space.resize(size, 0);
+        space.resize(size as usize, 0);
         let space = Rc::new(UnsafeCell::new(space));
         Self { space, id }
     }
@@ -408,8 +408,7 @@ impl MemStore for PlainMem {
         let length = length as usize;
         if offset + length > self.get_space_mut().len() {
             None
-        } else {
-            Some(Box::new(PlainMemRef {
+        } else { Some(Box::new(PlainMemRef {
                 offset,
                 length,
                 mem: self.clone(),

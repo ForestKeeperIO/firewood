@@ -132,7 +132,7 @@ struct CompactSpaceHeaderSliced<'a> {
 }
 
 impl CompactSpaceHeader {
-    const MSIZE: u64 = 32;
+    pub const MSIZE: u64 = 32;
 
     pub fn new(meta_base: u64, compact_base: u64) -> Self {
         unsafe {

@@ -16,3 +16,8 @@ hex = "0.4.3"
 
 [dependencies.shale]
 path = "./shale"
+
+[dev-dependencies]
+keccak-hasher = "0.15.3"
+rand = "0.8.5"
+triehash = "0.8.4"
