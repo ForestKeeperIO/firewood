@@ -261,7 +261,7 @@ pub trait ShaleStore {
     ) -> Result<ObjRef<'a, T>, ShaleError>;
     /// Allocate a new item.
     fn put_item<'a, T: MummyItem + 'a>(
-        &'a self, item: T, wctx: &WriteContext,
+        &'a self, item: T, extra: u64, wctx: &WriteContext,
     ) -> Result<ObjRef<'a, T>, ShaleError>;
     /// Free a item and recycle its space when applicable.
     fn free_item<T: MummyItem>(
@@ -320,14 +320,14 @@ impl<T: MummyItem> ShaleRef<T> for MummyRef<T> {
 }
 
 impl<T: MummyItem> MummyRef<T> {
-    fn new(addr: u64, space: &dyn MemStore) -> Result<Self, ShaleError> {
+    fn new(addr: u64, len_limit: u64, space: &dyn MemStore) -> Result<Self, ShaleError> {
         let (length, decoded) = T::hydrate(addr, space)?;
         Ok(Self {
             decoded,
             raw: space
                 .get_ref(addr, length)
                 .ok_or(ShaleError::LinearMemStoreError)?,
-            len_limit: length,
+            len_limit,
         })
     }
     fn from_hydrated(
@@ -464,13 +464,13 @@ impl LinearRef for PlainMemRef {
 }
 
 pub unsafe fn get_obj_ref<'a, T: 'a + MummyItem>(
-    store: &'a Box<dyn MemStore>, ptr: ObjPtr<T>,
+    store: &'a Box<dyn MemStore>, ptr: ObjPtr<T>, len_limit: u64,
 ) -> Result<ObjRef<'a, T>, ShaleError> {
     let addr = ptr.addr();
     Ok(ObjRef::from_shale(
         addr,
         store.id(),
-        Box::new(MummyRef::new(addr, store.as_ref())?),
+        Box::new(MummyRef::new(addr, len_limit, store.as_ref())?),
     ))
 }
 

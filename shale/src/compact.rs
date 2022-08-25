@@ -4,7 +4,7 @@ use super::{
 };
 use std::cell::UnsafeCell;
 
-struct CompactHeader {
+pub struct CompactHeader {
     payload_size: u64,
     is_freed: bool,
     desc_addr: ObjPtr<CompactDescriptor>,
@@ -13,7 +13,7 @@ struct CompactHeader {
 impl CompactHeader {
     #![allow(dead_code)]
 
-    const MSIZE: u64 = 17;
+    pub const MSIZE: u64 = 17;
     pub fn is_freed(&self) -> bool {
         self.is_freed
     }
@@ -287,13 +287,15 @@ impl CompactSpaceInner {
     fn get_descriptor<'a>(
         &'a self, ptr: ObjPtr<CompactDescriptor>,
     ) -> Result<ObjRef<'a, CompactDescriptor>, ShaleError> {
-        unsafe { super::get_obj_ref(&self.meta_space, ptr) }
+        unsafe {
+            super::get_obj_ref(&self.meta_space, ptr, CompactDescriptor::MSIZE)
+        }
     }
 
     fn get_data_ref<'a, T: MummyItem + 'a>(
-        &'a self, ptr: ObjPtr<T>,
+        &'a self, ptr: ObjPtr<T>, len_limit: u64,
     ) -> Result<ObjRef<'a, T>, ShaleError> {
-        unsafe { super::get_obj_ref(&self.compact_space, ptr) }
+        unsafe { super::get_obj_ref(&self.compact_space, ptr, len_limit) }
     }
 
     fn del_desc(
@@ -314,8 +316,10 @@ impl CompactSpaceInner {
                 ObjPtr::new_from_addr(desc_addr.addr)
             })?;
             desc.write(|r| *r = *desc_last, true, wctx);
-            let mut header =
-                self.get_data_ref::<CompactHeader>(ObjPtr::new(desc.haddr))?;
+            let mut header = self.get_data_ref::<CompactHeader>(
+                ObjPtr::new(desc.haddr),
+                CompactHeader::MSIZE,
+            )?;
             header.write(|h| h.desc_addr = desc_addr, true, wctx);
         }
         Ok(())
@@ -343,8 +347,10 @@ impl CompactSpaceInner {
         let mut offset = addr - hsize;
         let header_payload_size;
         {
-            let header =
-                self.get_data_ref::<CompactHeader>(ObjPtr::new(offset))?;
+            let header = self.get_data_ref::<CompactHeader>(
+                ObjPtr::new(offset),
+                CompactHeader::MSIZE,
+            )?;
             header_payload_size = header.payload_size;
             assert!(!header.is_freed);
         }
@@ -358,11 +364,15 @@ impl CompactSpaceInner {
             let pheader_payload_size;
             let pheader_desc_addr;
             {
-                let pfooter =
-                    self.get_data_ref::<CompactFooter>(ObjPtr::new(offset))?;
+                let pfooter = self.get_data_ref::<CompactFooter>(
+                    ObjPtr::new(offset),
+                    CompactFooter::MSIZE,
+                )?;
                 offset -= pfooter.payload_size + hsize;
-                let pheader =
-                    self.get_data_ref::<CompactHeader>(ObjPtr::new(offset))?;
+                let pheader = self.get_data_ref::<CompactHeader>(
+                    ObjPtr::new(offset),
+                    CompactHeader::MSIZE,
+                )?;
                 pheader_is_freed = pheader.is_freed;
                 pheader_payload_size = pheader.payload_size;
                 pheader_desc_addr = pheader.desc_addr;
@@ -386,8 +396,10 @@ impl CompactSpaceInner {
             let nheader_payload_size;
             let nheader_desc_addr;
             {
-                let nheader =
-                    self.get_data_ref::<CompactHeader>(ObjPtr::new(offset))?;
+                let nheader = self.get_data_ref::<CompactHeader>(
+                    ObjPtr::new(offset),
+                    CompactHeader::MSIZE,
+                )?;
                 nheader_is_freed = nheader.is_freed;
                 nheader_payload_size = nheader.payload_size;
                 nheader_desc_addr = nheader.desc_addr;
@@ -396,8 +408,10 @@ impl CompactSpaceInner {
                 offset += hsize + nheader_payload_size;
                 f = offset;
                 {
-                    let nfooter = self
-                        .get_data_ref::<CompactFooter>(ObjPtr::new(offset))?;
+                    let nfooter = self.get_data_ref::<CompactFooter>(
+                        ObjPtr::new(offset),
+                        CompactFooter::MSIZE,
+                    )?;
                     assert!(nheader_payload_size == nfooter.payload_size);
                 }
                 payload_size += hsize + fsize + nheader_payload_size;
@@ -417,8 +431,14 @@ impl CompactSpaceInner {
                 wctx,
             );
         }
-        let mut h = self.get_data_ref::<CompactHeader>(ObjPtr::new(h))?;
-        let mut f = self.get_data_ref::<CompactFooter>(ObjPtr::new(f))?;
+        let mut h = self.get_data_ref::<CompactHeader>(
+            ObjPtr::new(h),
+            CompactHeader::MSIZE,
+        )?;
+        let mut f = self.get_data_ref::<CompactFooter>(
+            ObjPtr::new(f),
+            CompactFooter::MSIZE,
+        )?;
         h.write(
             |h| {
                 h.payload_size = payload_size;
@@ -466,6 +486,7 @@ impl CompactSpaceInner {
                 {
                     let mut header = self.get_data_ref::<CompactHeader>(
                         ObjPtr::new(desc_haddr),
+                        CompactHeader::MSIZE,
                     )?;
                     assert!(header.payload_size == desc_payload_size);
                     header.write(|h| h.is_freed = false, true, wctx);
@@ -477,6 +498,7 @@ impl CompactSpaceInner {
                 {
                     let mut lheader = self.get_data_ref::<CompactHeader>(
                         ObjPtr::new(desc_haddr),
+                        CompactHeader::MSIZE,
                     )?;
                     assert_eq!(lheader.payload_size, desc_payload_size);
                     lheader.write(
@@ -491,6 +513,7 @@ impl CompactSpaceInner {
                 {
                     let mut lfooter = self.get_data_ref::<CompactFooter>(
                         ObjPtr::new(desc_haddr + hsize + length),
+                        CompactFooter::MSIZE,
                     )?;
                     //assert!(lfooter.payload_size == desc_payload_size);
                     lfooter.write(|f| f.payload_size = length, true, wctx);
@@ -511,8 +534,10 @@ impl CompactSpaceInner {
                     );
                 }
                 {
-                    let mut rheader = self
-                        .get_data_ref::<CompactHeader>(ObjPtr::new(offset))?;
+                    let mut rheader = self.get_data_ref::<CompactHeader>(
+                        ObjPtr::new(offset),
+                        CompactHeader::MSIZE,
+                    )?;
                     rheader.write(
                         |rh| {
                             rh.is_freed = true;
@@ -526,6 +551,7 @@ impl CompactSpaceInner {
                 {
                     let mut rfooter = self.get_data_ref::<CompactFooter>(
                         ObjPtr::new(offset + hsize + rpayload_size),
+                        CompactFooter::MSIZE,
                     )?;
                     rfooter.write(
                         |f| f.payload_size = rpayload_size,
@@ -573,10 +599,14 @@ impl CompactSpaceInner {
             true,
             wctx,
         );
-        let mut h = self.get_data_ref::<CompactHeader>(ObjPtr::new(offset))?;
-        let mut f = self.get_data_ref::<CompactFooter>(ObjPtr::new(
-            offset + CompactHeader::MSIZE + length,
-        ))?;
+        let mut h = self.get_data_ref::<CompactHeader>(
+            ObjPtr::new(offset),
+            CompactHeader::MSIZE,
+        )?;
+        let mut f = self.get_data_ref::<CompactFooter>(
+            ObjPtr::new(offset + CompactHeader::MSIZE + length),
+            CompactFooter::MSIZE,
+        )?;
         h.write(
             |h| {
                 h.payload_size = length;
@@ -616,10 +646,10 @@ impl CompactSpace {
 
 impl ShaleStore for CompactSpace {
     fn put_item<'a, T: MummyItem + 'a>(
-        &'a self, item: T, wctx: &WriteContext,
+        &'a self, item: T, extra: u64, wctx: &WriteContext,
     ) -> Result<ObjRef<'a, T>, ShaleError> {
         let bytes = item.dehydrate();
-        let size = bytes.len() as u64;
+        let size = bytes.len() as u64 + extra;
         let inner = unsafe { &mut *self.inner.get() };
         let ptr: ObjPtr<T> = unsafe {
             ObjPtr::new_from_addr(
@@ -653,6 +683,11 @@ impl ShaleStore for CompactSpace {
     fn get_item<'a, T: MummyItem + 'a>(
         &'a self, ptr: ObjPtr<T>,
     ) -> Result<ObjRef<'a, T>, ShaleError> {
-        unsafe { &*self.inner.get() }.get_data_ref(ptr)
+        let inner = unsafe { &*self.inner.get() };
+        let h = inner.get_data_ref::<CompactHeader>(
+            ObjPtr::new(ptr.addr() - CompactHeader::MSIZE),
+            CompactHeader::MSIZE,
+        )?;
+        inner.get_data_ref(ptr, h.payload_size)
     }
 }
