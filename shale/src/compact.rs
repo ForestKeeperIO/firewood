@@ -630,8 +630,15 @@ impl ShaleStore for CompactSpace {
                 },
             )
         };
-        let mut u: ObjRef<T> =
-            unsafe { super::obj_ref_from_item(&inner.compact_space, ptr.addr(), size, size, item)? };
+        let mut u: ObjRef<T> = unsafe {
+            super::obj_ref_from_item(
+                &inner.compact_space,
+                ptr.addr(),
+                size,
+                size,
+                item,
+            )?
+        };
         u.write(|_| {}, true, wctx);
         Ok(u)
     }

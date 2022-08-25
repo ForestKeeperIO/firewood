@@ -330,7 +330,10 @@ impl<T: MummyItem> MummyRef<T> {
             len_limit: length,
         })
     }
-    fn from_hydrated(addr: u64, length: u64, len_limit: u64, decoded: T, space: &dyn MemStore) -> Result<Self, ShaleError> {
+    fn from_hydrated(
+        addr: u64, length: u64, len_limit: u64, decoded: T,
+        space: &dyn MemStore,
+    ) -> Result<Self, ShaleError> {
         Ok(Self {
             decoded,
             raw: space
@@ -343,7 +346,8 @@ impl<T: MummyItem> MummyRef<T> {
 
 impl<T> MummyRef<T> {
     unsafe fn new_from_slice(
-        addr: u64, length: u64, len_limit: u64, decoded: T, space: &dyn MemStore,
+        addr: u64, length: u64, len_limit: u64, decoded: T,
+        space: &dyn MemStore,
     ) -> Result<Self, ShaleError> {
         Ok(Self {
             decoded,
@@ -420,7 +424,8 @@ impl MemStore for PlainMem {
         let length = length as usize;
         if offset + length > self.get_space_mut().len() {
             None
-        } else { Some(Box::new(PlainMemRef {
+        } else {
+            Some(Box::new(PlainMemRef {
                 offset,
                 length,
                 mem: self.clone(),
@@ -470,11 +475,18 @@ pub unsafe fn get_obj_ref<'a, T: 'a + MummyItem>(
 }
 
 pub unsafe fn obj_ref_from_item<'a, T: 'a + MummyItem>(
-    store: &'a Box<dyn MemStore>, addr: u64, length: u64, len_limit: u64, decoded: T,
+    store: &'a Box<dyn MemStore>, addr: u64, length: u64, len_limit: u64,
+    decoded: T,
 ) -> Result<ObjRef<'a, T>, ShaleError> {
     Ok(ObjRef::from_shale(
         addr,
         store.id(),
-        Box::new(MummyRef::from_hydrated(addr, length, len_limit, decoded, store.as_ref())?),
+        Box::new(MummyRef::from_hydrated(
+            addr,
+            length,
+            len_limit,
+            decoded,
+            store.as_ref(),
+        )?),
     ))
 }
