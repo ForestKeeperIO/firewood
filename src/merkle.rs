@@ -560,6 +560,9 @@ macro_rules! write_node {
         if let None = $r.write($modify, true, &$self.wctx) {
             $self.set_parent($self.new_node($r.clone())?.as_ptr(), $parents, $deleted);
             $deleted.push($r.as_ptr());
+            true
+        } else {
+            false
         }
     };
 }
@@ -870,7 +873,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                 },
                 &mut parents,
                 &mut deleted
-            )
+            );
         }
 
         for ptr in updated.into_iter() {
@@ -912,52 +915,51 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
         }
         deleted.push(b_ref.as_ptr());
         let val = b_inner.value.clone();
+        let (mut p1_ref, p1_idx) = parents.pop().unwrap();
+        let p1_ptr = p1_ref.as_ptr();
         if let Some(val) = val {
-            let (mut p1_ref, p1_idx) = parents.pop().unwrap();
-            let p1_ptr = p1_ref.as_ptr();
-            p1_ref
-                .write(
-                    |p1| {
-                        match &mut p1.inner {
-                            NodeType::Branch(n) => {
-                                // from: [Branch] -> [b (v)]x -> [Leaf]x
-                                // to: [Branch] -> [Leaf (v)]
-                                let leaf = self
-                                    .new_node(Node::new(
-                                        NodeType::Leaf(LeafNode(PartialPath(vec![p1_idx]), val)),
-                                        &self.m.store,
-                                    ))
-                                    .unwrap()
-                                    .as_ptr();
-                                n.chd[p1_idx as usize] = Some(leaf)
-                            }
-                            NodeType::Extension(n) => {
-                                // from: P -> [Ext]x -> [b (v)]x -> [leaf]x
-                                // to: P -> [Leaf (v)]
-                                let mut path = n.0.clone().into_inner();
-                                path.push(p1_idx);
-                                let leaf = self
-                                    .new_node(Node::new(
-                                        NodeType::Leaf(LeafNode(PartialPath(path), val)),
-                                        &self.m.store,
-                                    ))
-                                    .unwrap()
-                                    .as_ptr();
-                                deleted.push(p1_ptr);
-                                self.set_parent(leaf, parents, deleted);
-                            }
-                            _ => unreachable!(),
-                        }
-                        p1.root_hash = p1.inner.hash(&self.m.store);
-                    },
-                    true,
-                    &self.wctx,
-                )
-                .unwrap();
+            match &p1_ref.inner {
+                NodeType::Branch(_) => {
+                    // from: [Branch] -> [b (v)]x -> [Leaf]x
+                    // to: [Branch] -> [Leaf (v)]
+                    let leaf = self
+                        .new_node(Node::new(
+                            NodeType::Leaf(LeafNode(PartialPath(vec![p1_idx]), val)),
+                            &self.m.store,
+                        ))
+                        .unwrap()
+                        .as_ptr();
+                    write_node!(
+                        self,
+                        p1_ref,
+                        |p1| {
+                            p1.inner.as_branch_mut().unwrap().chd[p1_idx as usize] = Some(leaf);
+                            p1.root_hash = p1.inner.hash(&self.m.store)
+                        },
+                        parents,
+                        deleted
+                    );
+                }
+                NodeType::Extension(n) => {
+                    // from: P -> [Ext]x -> [b (v)]x -> [leaf]x
+                    // to: P -> [Leaf (v)]
+                    let mut path = n.0.clone().into_inner();
+                    path.push(p1_idx);
+                    let leaf = self
+                        .new_node(Node::new(
+                            NodeType::Leaf(LeafNode(PartialPath(path), val)),
+                            &self.m.store,
+                        ))
+                        .unwrap()
+                        .as_ptr();
+                    deleted.push(p1_ptr);
+                    self.set_parent(leaf, parents, deleted);
+                }
+                _ => unreachable!(),
+            }
         } else {
             let (c_ptr, idx) = b_chd.unwrap();
             let mut c_ref = self.m.get_node(c_ptr).unwrap();
-            let (mut p1_ref, p1_idx) = parents.pop().unwrap();
             match &c_ref.inner {
                 NodeType::Branch(_) => {
                     match &p1_ref.inner {
@@ -976,10 +978,10 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                             self.set_parent(ext, parents, deleted);
                         }
                         NodeType::Extension(_) => {
-                            //                         ____[Branch]
-                            //                        /
+                            //                      ____[Branch]
+                            //                     /
                             // from: [Ext] -> [b]x*
-                            //                        \____[Leaf]x
+                            //                     \____[Leaf]x
                             // to: [Ext] -> [Branch]
                             write_node!(
                                 self,
@@ -992,7 +994,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                                 },
                                 parents,
                                 deleted
-                            )
+                            );
                         }
                         _ => unreachable!(),
                     }
@@ -1005,59 +1007,63 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                             // from: [Branch] -> [b]x*
                             //                        \____[Leaf]x
                             // to: [Branch] -> [Leaf/Ext]
-                            c_ref
-                                .write(
-                                    |c| {
-                                        (match &mut c.inner {
-                                            NodeType::Leaf(n) => &mut n.0,
-                                            NodeType::Extension(n) => &mut n.0,
-                                            _ => unreachable!(),
-                                        })
-                                        .0
-                                        .insert(0, idx);
-                                        c.root_hash = c.inner.hash(&self.m.store)
-                                    },
-                                    true,
-                                    &self.wctx,
-                                )
-                                .unwrap();
-                            p1_ref
-                                .write(
-                                    |p1| {
-                                        p1.inner.as_branch_mut().unwrap().chd[p1_idx as usize] = Some(c_ptr);
-                                        p1.root_hash = p1.inner.hash(&self.m.store)
-                                    },
-                                    true,
-                                    &self.wctx,
-                                )
-                                .unwrap();
+                            let c_ptr = if let None = c_ref.write(
+                                |c| {
+                                    (match &mut c.inner {
+                                        NodeType::Leaf(n) => &mut n.0,
+                                        NodeType::Extension(n) => &mut n.0,
+                                        _ => unreachable!(),
+                                    })
+                                    .0
+                                    .insert(0, idx);
+                                    c.root_hash = c.inner.hash(&self.m.store)
+                                },
+                                true,
+                                &self.wctx,
+                            ) {
+                                deleted.push(c_ptr);
+                                self.new_node(c_ref.clone())?.as_ptr()
+                            } else {
+                                c_ptr
+                            };
+                            write_node!(
+                                self,
+                                p1_ref,
+                                |p1| {
+                                    p1.inner.as_branch_mut().unwrap().chd[p1_idx as usize] = Some(c_ptr);
+                                    p1.root_hash = p1.inner.hash(&self.m.store)
+                                },
+                                parents,
+                                deleted
+                            );
                         }
                         NodeType::Extension(_) => {
-                            //                         ____[Leaf/Ext]
-                            //                        /
-                            // from: P -> [Ext] -> [b]x*
-                            //                        \____[Leaf]x
+                            //                           ____[Leaf/Ext]
+                            //                          /
+                            // from: P -> [Ext]x -> [b]x*
+                            //                          \____[Leaf]x
                             // to: P -> [Leaf/Ext]
-                            c_ref
-                                .write(
-                                    |c| {
-                                        let mut path = p1_ref.inner.as_extension().unwrap().0.clone().into_inner();
-                                        path.push(idx);
-                                        let path0 = match &mut c.inner {
-                                            NodeType::Leaf(n) => &mut n.0,
-                                            NodeType::Extension(n) => &mut n.0,
-                                            _ => unreachable!(),
-                                        };
-                                        path.extend(&**path0);
-                                        *path0 = PartialPath(path);
-                                        c.root_hash = c.inner.hash(&self.m.store)
-                                    },
-                                    true,
-                                    &self.wctx,
-                                )
-                                .unwrap();
                             deleted.push(p1_ref.as_ptr());
-                            self.set_parent(c_ptr, parents, deleted);
+                            if !write_node!(
+                                self,
+                                c_ref,
+                                |c| {
+                                    let mut path = p1_ref.inner.as_extension().unwrap().0.clone().into_inner();
+                                    path.push(idx);
+                                    let path0 = match &mut c.inner {
+                                        NodeType::Leaf(n) => &mut n.0,
+                                        NodeType::Extension(n) => &mut n.0,
+                                        _ => unreachable!(),
+                                    };
+                                    path.extend(&**path0);
+                                    *path0 = PartialPath(path);
+                                    c.root_hash = c.inner.hash(&self.m.store)
+                                },
+                                parents,
+                                deleted
+                            ) {
+                                self.set_parent(c_ptr, parents, deleted);
+                            }
                         }
                         _ => unreachable!(),
                     }
@@ -1076,85 +1082,91 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
         let mut c_ref = self.m.get_node(c_ptr).unwrap();
         match &c_ref.inner {
             NodeType::Branch(_) => {
-                b_ref
-                    .write(
-                        |b| {
-                            match &mut b.inner {
-                                NodeType::Branch(n) => {
-                                    // from: [Branch] -> [Branch]x -> [Branch]
-                                    // to: [Branch] -> [Ext] -> [Branch]
-                                    n.chd[b_idx as usize] = Some(
-                                        self.new_node(Node::new(
-                                            NodeType::Extension(ExtNode(PartialPath(vec![idx]), c_ptr)),
-                                            &self.m.store,
-                                        ))
-                                        .unwrap()
-                                        .as_ptr(),
-                                    );
-                                }
-                                NodeType::Extension(n) => {
-                                    // from: [Ext] -> [Branch]x -> [Branch]
-                                    // to: [Ext] -> [Branch]
-                                    n.0 .0.push(idx);
-                                    n.1 = c_ptr
-                                }
-                                _ => unreachable!(),
+                write_node!(
+                    self,
+                    b_ref,
+                    |b| {
+                        match &mut b.inner {
+                            NodeType::Branch(n) => {
+                                // from: [Branch] -> [Branch]x -> [Branch]
+                                // to: [Branch] -> [Ext] -> [Branch]
+                                n.chd[b_idx as usize] = Some(
+                                    self.new_node(Node::new(
+                                        NodeType::Extension(ExtNode(PartialPath(vec![idx]), c_ptr)),
+                                        &self.m.store,
+                                    ))
+                                    .unwrap()
+                                    .as_ptr(),
+                                );
                             }
-                            b.root_hash = b.inner.hash(&self.m.store)
-                        },
-                        true,
-                        &self.wctx,
-                    )
-                    .unwrap();
+                            NodeType::Extension(n) => {
+                                // from: [Ext] -> [Branch]x -> [Branch]
+                                // to: [Ext] -> [Branch]
+                                n.0 .0.push(idx);
+                                n.1 = c_ptr
+                            }
+                            _ => unreachable!(),
+                        }
+                        b.root_hash = b.inner.hash(&self.m.store)
+                    },
+                    parents,
+                    deleted
+                );
             }
             NodeType::Leaf(_) | NodeType::Extension(_) => match &b_ref.inner {
                 NodeType::Branch(_) => {
                     // from: [Branch] -> [Branch]x -> [Leaf/Ext]
                     // to: [Branch] -> [Leaf/Ext]
-                    c_ref
-                        .write(
-                            |c| {
-                                match &mut c.inner {
-                                    NodeType::Leaf(n) => &mut n.0,
-                                    NodeType::Extension(n) => &mut n.0,
-                                    _ => unreachable!(),
-                                }
-                                .0
-                                .insert(0, idx);
-                                c.root_hash = c.inner.hash(&self.m.store)
-                            },
-                            true,
-                            &self.wctx,
-                        )
-                        .unwrap();
-                    b_ref
-                        .write(
-                            |b| b.inner.as_branch_mut().unwrap().chd[b_idx as usize] = Some(c_ptr),
-                            true,
-                            &self.wctx,
-                        )
-                        .unwrap()
+                    let c_ptr = if let None = c_ref.write(
+                        |c| {
+                            match &mut c.inner {
+                                NodeType::Leaf(n) => &mut n.0,
+                                NodeType::Extension(n) => &mut n.0,
+                                _ => unreachable!(),
+                            }
+                            .0
+                            .insert(0, idx);
+                            c.root_hash = c.inner.hash(&self.m.store)
+                        },
+                        true,
+                        &self.wctx,
+                    ) {
+                        deleted.push(c_ptr);
+                        self.new_node(c_ref.clone())?.as_ptr()
+                    } else {
+                        c_ptr
+                    };
+                    write_node!(
+                        self,
+                        b_ref,
+                        |b| b.inner.as_branch_mut().unwrap().chd[b_idx as usize] = Some(c_ptr),
+                        parents,
+                        deleted
+                    );
                 }
                 NodeType::Extension(n) => {
                     // from: P -> [Ext] -> [Branch]x -> [Leaf/Ext]
                     // to: P -> [Leaf/Ext]
-                    c_ref
-                        .write(
-                            |c| {
-                                let mut path = n.0.clone().into_inner();
-                                let path0 = match &mut c.inner {
-                                    NodeType::Leaf(n) => &mut n.0,
-                                    NodeType::Extension(n) => &mut n.0,
-                                    _ => unreachable!(),
-                                };
-                                path.extend(&**path0);
-                                *path0 = PartialPath(path);
-                                c.root_hash = c.inner.hash(&self.m.store)
-                            },
-                            true,
-                            &self.wctx,
-                        )
-                        .unwrap();
+                    let c_ptr = if let None = c_ref.write(
+                        |c| {
+                            let mut path = n.0.clone().into_inner();
+                            let path0 = match &mut c.inner {
+                                NodeType::Leaf(n) => &mut n.0,
+                                NodeType::Extension(n) => &mut n.0,
+                                _ => unreachable!(),
+                            };
+                            path.extend(&**path0);
+                            *path0 = PartialPath(path);
+                            c.root_hash = c.inner.hash(&self.m.store)
+                        },
+                        true,
+                        &self.wctx,
+                    ) {
+                        deleted.push(c_ptr);
+                        self.new_node(c_ref.clone())?.as_ptr()
+                    } else {
+                        c_ptr
+                    };
                     self.set_parent(c_ptr, parents, deleted);
                 }
                 _ => unreachable!(),
@@ -1253,7 +1265,6 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                 .unwrap();
         }
 
-        println!("found {}", found);
         // FIXME
         /*
         for ptr in deleted.into_iter() {
@@ -1272,9 +1283,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
 }
 
 #[cfg(test)]
-fn merkle_build_test<K: AsRef<[u8]> + std::cmp::Ord + Clone, V: AsRef<[u8]> + Clone>(
-    items: Vec<(K, V)>, meta_size: u64, compact_size: u64,
-) -> (Merkle<shale::compact::CompactSpace>, Vec<shale::DiskWrite>) {
+fn merkle_setup_test(meta_size: u64, compact_size: u64) -> Merkle<shale::compact::CompactSpace> {
     use shale::{compact::CompactSpaceHeader, PlainMem};
     const RESERVED: u64 = 0x1000;
     assert!(meta_size > RESERVED);
@@ -1302,10 +1311,15 @@ fn merkle_build_test<K: AsRef<[u8]> + std::cmp::Ord + Clone, V: AsRef<[u8]> + Cl
     };
 
     let space = shale::compact::CompactSpace::new(mem_meta, mem_payload, compact_header, 10, 16).unwrap();
-    let merkle = {
-        let wctx = WriteContext::new();
-        Merkle::new(merkle_header, space, &wctx)
-    };
+    let wctx = WriteContext::new();
+    Merkle::new(merkle_header, space, &wctx)
+}
+
+#[cfg(test)]
+fn merkle_build_test<K: AsRef<[u8]> + std::cmp::Ord + Clone, V: AsRef<[u8]> + Clone>(
+    items: Vec<(K, V)>, meta_size: u64, compact_size: u64,
+) -> (Merkle<shale::compact::CompactSpace>, Vec<shale::DiskWrite>) {
+    let merkle = merkle_setup_test(meta_size, compact_size);
     let mut batch = merkle.new_batch();
     for (k, v) in items.iter() {
         batch.insert(k, v.as_ref().to_vec()).unwrap();
@@ -1374,33 +1388,44 @@ fn test_root_hash_fuzz_insertions() {
 }
 
 #[test]
-fn test_root_hash_simple_deletions() {
-    let items = vec![
-        ("do", "verb"),
-        ("doe", "reindeer"),
-        ("dog", "puppy"),
-        ("doge", "coin"),
-        ("horse", "stallion"),
-        ("ddd", "ok"),
-    ];
-    let (merkle, writes) = merkle_build_test(items, 0x10000, 0x10000);
-    let items0 = vec![
-        ("do", "verb"),
-        ("doe", "reindeer"),
-        ("dog", "puppy"),
-        ("doge", "coin"),
-        ("horse", "stallion"),
-    ];
-    merkle.dump();
-    let mut batch = merkle.new_batch();
-    for k in [("ddd")] {
-        batch.remove(k).unwrap();
+fn test_root_hash_reversed_deletions() {
+    use rand::{rngs::StdRng, Rng, SeedableRng};
+    let rng = std::cell::RefCell::new(StdRng::seed_from_u64(42));
+    let max_len0 = 8;
+    let max_len1 = 4;
+    let keygen = || {
+        let (len0, len1): (usize, usize) = {
+            let mut rng = rng.borrow_mut();
+            (rng.gen_range(1..max_len0 + 1), rng.gen_range(1..max_len1 + 1))
+        };
+        let key: Vec<u8> = (0..len0)
+            .map(|_| rng.borrow_mut().gen_range(0..2))
+            .chain((0..len1).map(|_| rng.borrow_mut().gen()))
+            .collect();
+        key
+    };
+    for _ in 0..1 {
+        let mut items = Vec::new();
+        for _ in 0..10 {
+            let val: Vec<u8> = (0..8).map(|_| rng.borrow_mut().gen()).collect();
+            items.push((keygen(), val));
+        }
+        let merkle = merkle_setup_test(0x100000, 0x100000);
+        for (k, v) in items.iter() {
+            let mut wb = merkle.new_batch();
+            wb.insert(k, v.to_vec());
+            wb.commit();
+            println!("{} {} {}", hex::encode(k), hex::encode(v), hex::encode(&*merkle.root_hash()));
+            merkle.dump();
+        }
+        println!("----");
+        for (k, _) in items.iter().rev() {
+            let mut wb = merkle.new_batch();
+            wb.remove(k);
+            wb.commit();
+            println!("{} {}", hex::encode(k), hex::encode(&*merkle.root_hash()));
+            merkle.dump();
+        }
+        println!("====");
     }
-    batch.commit();
-    println!("{}", hex::encode(&*merkle.root_hash()));
-    println!(
-        "{}",
-        hex::encode(triehash::trie_root::<keccak_hasher::KeccakHasher, _, _, _>(items0))
-    );
-    merkle.dump();
 }
