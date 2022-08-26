@@ -168,25 +168,20 @@ impl Debug for BranchNode {
 }
 
 impl BranchNode {
-    fn single_child(&self) -> Option<Option<(ObjPtr<Node>, u8)>> {
-        let mut has_chd = None;
+    fn single_child(&self) -> (Option<(ObjPtr<Node>, u8)>, bool) {
+        let mut has_chd = false;
+        let mut only_chd = None;
         for (i, c) in self.chd.iter().enumerate() {
             if c.is_some() {
-                if has_chd.is_some() {
-                    return None
+                has_chd = true;
+                if only_chd.is_some() {
+                    only_chd = None;
+                    break
                 }
-                has_chd = c.clone().map(|e| (e, i as u8))
+                only_chd = c.clone().map(|e| (e, i as u8))
             }
         }
-        if has_chd.is_some() {
-            Some(has_chd)
-        } else {
-            if self.value.is_some() {
-                Some(None)
-            } else {
-                None
-            }
-        }
+        (only_chd, has_chd)
     }
 
     fn rlp<S: ShaleStore>(&self, store: &S) -> Vec<u8> {
@@ -898,8 +893,8 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
         let (mut b_ref, b_idx) = parents.pop().unwrap();
         // the immediate parent of a leaf must be a branch
         let b_inner = b_ref.inner.as_branch().unwrap();
-        let b_chd = b_inner.single_child();
-        if b_chd.is_none() || np == 1 {
+        let (b_chd, has_chd) = b_inner.single_child();
+        if b_chd.is_none() || (has_chd && b_inner.value.is_some()) || np == 1 {
             b_ref
                 .write(
                     |b| b.inner.as_branch_mut().unwrap().chd[b_idx as usize] = None,
@@ -962,7 +957,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                 )
                 .unwrap();
         } else {
-            let (c_ptr, idx) = b_chd.unwrap().unwrap();
+            let (c_ptr, idx) = b_chd.unwrap();
             let mut c_ref = self.m.get_node(c_ptr).unwrap();
             match &c_ref.inner {
                 NodeType::Branch(_) => {
@@ -1074,6 +1069,130 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
             u_ref = self.m.get_node(next_ptr)?;
         }
         if !found {
+            match &u_ref.inner {
+                NodeType::Branch(n) => {
+                    let (c_chd, _) = n.single_child();
+                    if let Some((c_ptr, idx)) = c_chd {
+                        // [b] -> [u] -> [c]
+                        let (mut b_ref, b_idx) = parents.pop().unwrap();
+                        let mut c_ref = self.m.get_node(c_ptr).unwrap();
+                        match &c_ref.inner {
+                            NodeType::Branch(_) => {
+                                b_ref.write(
+                                    |b| {
+                                        match &mut b.inner {
+                                            NodeType::Branch(n) => {
+                                                n.chd[b_idx as usize] = Some(
+                                                    self.new_node(Node::new(
+                                                        NodeType::Extension(ExtNode(PartialPath(vec![idx]), c_ptr)),
+                                                        &self.m.store,
+                                                    ))
+                                                    .unwrap()
+                                                    .as_ptr(),
+                                                );
+                                            }
+                                            NodeType::Extension(n) => {
+                                                n.0 .0.push(idx);
+                                                n.1 = c_ptr
+                                            }
+                                            _ => unreachable!(),
+                                        }
+                                        b.root_hash = b.inner.hash(&self.m.store)
+                                    },
+                                    true,
+                                    &self.wctx,
+                                );
+                            }
+                            NodeType::Leaf(_) => match &b_ref.inner {
+                                NodeType::Branch(n) => {
+                                    c_ref
+                                        .write(
+                                            |c| {
+                                                let cc = c.inner.as_leaf_mut().unwrap();
+                                                cc.0 .0.insert(0, idx);
+                                                c.root_hash = c.inner.hash(&self.m.store)
+                                            },
+                                            true,
+                                            &self.wctx,
+                                        )
+                                        .unwrap();
+                                    b_ref
+                                        .write(
+                                            |b| b.inner.as_branch_mut().unwrap().chd[b_idx as usize] = Some(c_ptr),
+                                            true,
+                                            &self.wctx,
+                                        )
+                                        .unwrap()
+                                }
+                                NodeType::Extension(n) => {
+                                    c_ref
+                                        .write(
+                                            |c| {
+                                                let cc = c.inner.as_leaf_mut().unwrap();
+                                                let mut path = n.0.clone().into_inner();
+                                                path.extend(&*cc.0);
+                                                cc.0 = PartialPath(path);
+                                                c.root_hash = c.inner.hash(&self.m.store)
+                                            },
+                                            true,
+                                            &self.wctx,
+                                        )
+                                        .unwrap();
+                                    self.set_parent(c_ptr, &mut parents, &mut deleted);
+                                }
+                                _ => unreachable!(),
+                            },
+                            NodeType::Extension(_) => match &b_ref.inner {
+                                NodeType::Branch(n) => {
+                                    c_ref
+                                        .write(
+                                            |c| {
+                                                let cc = c.inner.as_extension_mut().unwrap();
+                                                cc.0 .0.insert(0, idx);
+                                                c.root_hash = c.inner.hash(&self.m.store)
+                                            },
+                                            true,
+                                            &self.wctx,
+                                        )
+                                        .unwrap();
+                                    b_ref
+                                        .write(
+                                            |b| b.inner.as_branch_mut().unwrap().chd[b_idx as usize] = Some(c_ptr),
+                                            true,
+                                            &self.wctx,
+                                        )
+                                        .unwrap()
+                                }
+                                NodeType::Extension(n) => {
+                                    c_ref
+                                        .write(
+                                            |c| {
+                                                let cc = c.inner.as_leaf_mut().unwrap();
+                                                let mut path = n.0.clone().into_inner();
+                                                path.extend(&*cc.0);
+                                                cc.0 = PartialPath(path);
+                                                c.root_hash = c.inner.hash(&self.m.store)
+                                            },
+                                            true,
+                                            &self.wctx,
+                                        )
+                                        .unwrap();
+                                    self.set_parent(c_ptr, &mut parents, &mut deleted);
+                                },
+                                _ => unreachable!(),
+                            },
+                        }
+                    }
+                }
+                NodeType::Leaf(n) => {
+                    if n.0.len() > 0 {
+                        return Ok(false)
+                    }
+                    found = true;
+                    self.remove_leaf(&mut parents, &mut deleted)?
+                }
+                _ => (),
+            }
             // TODO
         }
         Ok(found)
