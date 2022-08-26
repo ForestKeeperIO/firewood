@@ -975,6 +975,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                                     &self.m.store,
                                 ))?
                                 .as_ptr();
+                            parents.push((p1_ref, p1_idx));
                             self.set_parent(ext, parents, deleted);
                         }
                         NodeType::Extension(_) => {
@@ -1037,7 +1038,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                                 deleted
                             );
                         }
-                        NodeType::Extension(_) => {
+                        NodeType::Extension(n) => {
                             //                           ____[Leaf/Ext]
                             //                          /
                             // from: P -> [Ext]x -> [b]x*
@@ -1048,7 +1049,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                                 self,
                                 c_ref,
                                 |c| {
-                                    let mut path = p1_ref.inner.as_extension().unwrap().0.clone().into_inner();
+                                    let mut path = n.0.clone().into_inner();
                                     path.push(idx);
                                     let path0 = match &mut c.inner {
                                         NodeType::Leaf(n) => &mut n.0,
@@ -1404,28 +1405,33 @@ fn test_root_hash_reversed_deletions() {
             .collect();
         key
     };
-    for _ in 0..1 {
+    for i in 0..1000 {
         let mut items = Vec::new();
         for _ in 0..10 {
             let val: Vec<u8> = (0..8).map(|_| rng.borrow_mut().gen()).collect();
             items.push((keygen(), val));
         }
         let merkle = merkle_setup_test(0x100000, 0x100000);
+        let mut hashes = Vec::new();
         for (k, v) in items.iter() {
             let mut wb = merkle.new_batch();
             wb.insert(k, v.to_vec());
             wb.commit();
-            println!("{} {} {}", hex::encode(k), hex::encode(v), hex::encode(&*merkle.root_hash()));
-            merkle.dump();
+            hashes.push(merkle.root_hash());
         }
+        hashes.pop();
         println!("----");
-        for (k, _) in items.iter().rev() {
+        for ((k, _), h) in items.iter().rev().zip(hashes.iter().rev()) {
             let mut wb = merkle.new_batch();
             wb.remove(k);
             wb.commit();
-            println!("{} {}", hex::encode(k), hex::encode(&*merkle.root_hash()));
-            merkle.dump();
+            let h0 = merkle.root_hash();
+            if *h != h0 {
+                println!("{} != {}", hex::encode(&**h), hex::encode(&*h0));
+                merkle.dump();
+                panic!();
+            }
         }
-        println!("====");
+        println!("i = {}", i);
     }
 }
