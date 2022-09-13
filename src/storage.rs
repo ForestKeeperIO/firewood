@@ -32,11 +32,11 @@ pub struct StorageRev(Arc<StorageRevInner>);
 
 impl fmt::Debug for StorageRev {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "[StorageRev")?;
+        write!(f, "<StorageRev")?;
         for d in self.0.deltas.iter() {
-            write!(f, " 0x{:x}-0x{:x}", d.0, d.0 + PAGE_SIZE)?;
+            write!(f, " 0x{:x}", d.0)?;
         }
-        write!(f, "]\n")
+        write!(f, ">\n")
     }
 }
 
@@ -82,10 +82,6 @@ impl StorageRev {
             tail = std::cmp::max(tail, ep)
         }
         create_dirty_pages!(head, tail);
-
-        for d in deltas.iter() {
-            println!("0x{:x}-0x{:x}", d.0, d.0 + PAGE_SIZE);
-        }
 
         let psize = PAGE_SIZE as usize;
         for w in writes.into_iter() {
@@ -141,13 +137,19 @@ impl MemStore for StorageRev {
         let mut l = 0;
         let mut r = deltas.len();
         // no dirty page, before or after all dirty pages
-        if r == 0 || start >= deltas[r - 1].0 + PAGE_SIZE || end <= deltas[0].0 {
-            return self.0.prev.get_ref(start, end)
+        if r == 0 {
+            return self.0.prev.get_ref(start, end - start)
         }
         // otherwise, some dirty pages are covered by the range
         while r - l > 1 {
             let mid = (l + r) >> 1;
             (*if start < deltas[mid].0 { &mut r } else { &mut l }) = mid;
+        }
+        if start >= deltas[l].0 + PAGE_SIZE {
+            l += 1
+        }
+        if l >= deltas.len() || end < deltas[l].0 {
+            return self.0.prev.get_ref(start, end - start)
         }
         let mut data = Vec::new();
         let p_off = std::cmp::min(end - deltas[l].0, PAGE_SIZE);
@@ -156,11 +158,11 @@ impl MemStore for StorageRev {
             data.extend(&deltas[l].1[..p_off as usize]);
         } else {
             data.extend(&deltas[l].1[(start - deltas[l].0) as usize..p_off as usize]);
-        }
+        };
         start = deltas[l].0 + p_off;
         while start < end {
             l += 1;
-            if l >= deltas.len() {
+            if l >= deltas.len() || end < deltas[l].0 {
                 data.extend(self.0.prev.get_ref(start, end - start)?.deref());
                 break
             }
@@ -173,9 +175,6 @@ impl MemStore for StorageRev {
             }
             data.extend(&deltas[l].1);
             start = deltas[l].0 + PAGE_SIZE;
-        }
-        if data.len() != length as usize {
-            println!("{} {}", data.len(), length);
         }
         assert!(data.len() == length as usize);
 
@@ -245,7 +244,15 @@ fn test_apply_change() {
         }
         let z = Arc::new(ZeroStorage::new());
         let rev = StorageRev::apply_change(StoreSource::External(z), &writes).unwrap();
-        let ans = rev.get_ref(min, max - min).unwrap();
-        assert_eq!(ans.deref(), &*canvas);
+        println!("{:?}", rev);
+        assert_eq!(rev.get_ref(min, max - min).unwrap().deref(), &canvas);
+        for _ in 0..2 * n {
+            let l = rng.gen_range(min..max);
+            let r = rng.gen_range(l + 1..max);
+            assert_eq!(
+                rev.get_ref(l, r - l).unwrap().deref(),
+                &canvas[(l - min) as usize..(r - min) as usize]
+            );
+        }
     }
 }
