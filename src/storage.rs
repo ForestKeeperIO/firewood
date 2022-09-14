@@ -1,15 +1,20 @@
-use shale::{DiskWrite, LinearRef, MemStore};
 use std::fmt;
 use std::sync::Arc;
+
+use nix::fcntl::{flock, FlockArg};
+use shale::{DiskWrite, LinearRef, MemStore};
+use typed_builder::TypedBuilder;
+
+use crate::file::{Fd, File};
 
 const PAGE_SIZE_NBIT: u64 = 12;
 const PAGE_SIZE: u64 = 1 << PAGE_SIZE_NBIT;
 
 /// Basic copy-on-write item in the linear storage space for multi-versioning.
-struct StoragePage(u64, [u8; PAGE_SIZE as usize]);
+struct StorePage(u64, [u8; PAGE_SIZE as usize]);
 
 pub enum StoreSource {
-    Internal(StorageRev),
+    Internal(StoreRev),
     External(Arc<dyn MemStore>),
 }
 
@@ -22,26 +27,17 @@ impl StoreSource {
     }
 }
 
-pub struct StorageRevInner {
-    prev: StoreSource,
-    deltas: Vec<StoragePage>,
-}
+struct StoreDelta(Vec<StorePage>);
 
-#[derive(Clone)]
-pub struct StorageRev(Arc<StorageRevInner>);
-
-impl fmt::Debug for StorageRev {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "<StorageRev")?;
-        for d in self.0.deltas.iter() {
-            write!(f, " 0x{:x}", d.0)?;
-        }
-        write!(f, ">\n")
+impl std::ops::Deref for StoreDelta {
+    type Target = [StorePage];
+    fn deref(&self) -> &[StorePage] {
+        &self.0
     }
 }
 
-impl StorageRev {
-    pub fn apply_change(src: StoreSource, writes: &[DiskWrite]) -> Option<StorageRev> {
+impl StoreDelta {
+    pub fn new(src: &StoreSource, writes: &[DiskWrite]) -> Option<Self> {
         let mut deltas = Vec::new();
         let mut widx: Vec<_> = (0..writes.len()).filter(|i| writes[*i].data.len() > 0).collect();
         if widx.is_empty() {
@@ -61,7 +57,7 @@ impl StorageRev {
             ($l: expr, $r: expr) => {
                 for p in $l..=$r {
                     let off = p << PAGE_SIZE_NBIT;
-                    deltas.push(StoragePage(
+                    deltas.push(StorePage(
                         off,
                         src.get_ref(off, PAGE_SIZE).unwrap().deref().try_into().unwrap(),
                     ));
@@ -106,30 +102,54 @@ impl StorageRev {
                 deltas[l].1[..data.len()].copy_from_slice(&data);
             }
         }
-        let inner = StorageRevInner { prev: src, deltas };
-        Some(Self(Arc::new(inner)))
+        Some(Self(deltas))
     }
 }
 
-struct StorageRef<S: Clone + MemStore> {
+struct StoreRevInner {
+    prev: StoreSource,
+    deltas: StoreDelta,
+}
+
+#[derive(Clone)]
+pub struct StoreRev(Arc<StoreRevInner>);
+
+impl fmt::Debug for StoreRev {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "<StoreRev")?;
+        for d in self.0.deltas.iter() {
+            write!(f, " 0x{:x}", d.0)?;
+        }
+        write!(f, ">\n")
+    }
+}
+
+impl StoreRev {
+    pub fn apply_change(prev: StoreSource, writes: &[DiskWrite]) -> Option<StoreRev> {
+        let deltas = StoreDelta::new(&prev, writes)?;
+        Some(Self(Arc::new(StoreRevInner { prev, deltas })))
+    }
+}
+
+struct StoreRef<S: Clone + MemStore> {
     data: Vec<u8>,
     store: S,
 }
 
-impl<S: Clone + MemStore> std::ops::Deref for StorageRef<S> {
+impl<S: Clone + MemStore> std::ops::Deref for StoreRef<S> {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
         &self.data
     }
 }
 
-impl<S: Clone + MemStore + 'static> LinearRef for StorageRef<S> {
+impl<S: Clone + MemStore + 'static> LinearRef for StoreRef<S> {
     fn mem_image(&self) -> Box<dyn MemStore> {
         Box::new(self.store.clone())
     }
 }
 
-impl MemStore for StorageRev {
+impl MemStore for StoreRev {
     fn get_ref(&self, offset: u64, length: u64) -> Option<Box<dyn LinearRef>> {
         let mut start = offset;
         let end = start + length;
@@ -179,11 +199,11 @@ impl MemStore for StorageRev {
         assert!(data.len() == length as usize);
 
         let store = self.clone();
-        Some(Box::new(StorageRef { data, store }))
+        Some(Box::new(StoreRef { data, store }))
     }
 
     fn write(&self, _offset: u64, _change: &[u8]) {
-        panic!("StorageRev should not be written");
+        panic!("StoreRev should not be written");
     }
 
     fn id(&self) -> shale::SpaceID {
@@ -192,24 +212,24 @@ impl MemStore for StorageRev {
 }
 
 #[derive(Clone)]
-pub struct ZeroStorage(Arc<()>);
+pub struct ZeroStore(Arc<()>);
 
-impl ZeroStorage {
+impl ZeroStore {
     pub fn new() -> Self {
         Self(Arc::new(()))
     }
 }
 
-impl MemStore for ZeroStorage {
+impl MemStore for ZeroStore {
     fn get_ref(&self, _: u64, length: u64) -> Option<Box<dyn LinearRef>> {
-        Some(Box::new(StorageRef {
+        Some(Box::new(StoreRef {
             data: vec![0; length as usize],
             store: self.clone(),
         }))
     }
 
     fn write(&self, _: u64, _: &[u8]) {
-        panic!("ZeroStorage should not be written");
+        panic!("ZeroStore should not be written");
     }
 
     fn id(&self) -> shale::SpaceID {
@@ -223,7 +243,7 @@ fn test_apply_change() {
     let mut rng = StdRng::seed_from_u64(42);
     let min = rng.gen_range(0..2 * PAGE_SIZE);
     let max = rng.gen_range(min + 1 * PAGE_SIZE..min + 100 * PAGE_SIZE);
-    for _ in 0..1000 {
+    for _ in 0..2000 {
         let n = 20;
         let mut canvas = Vec::new();
         canvas.resize((max - min) as usize, 0);
@@ -242,8 +262,8 @@ fn test_apply_change() {
                 data,
             });
         }
-        let z = Arc::new(ZeroStorage::new());
-        let rev = StorageRev::apply_change(StoreSource::External(z), &writes).unwrap();
+        let z = Arc::new(ZeroStore::new());
+        let rev = StoreRev::apply_change(StoreSource::External(z), &writes).unwrap();
         println!("{:?}", rev);
         assert_eq!(rev.get_ref(min, max - min).unwrap().deref(), &canvas);
         for _ in 0..2 * n {
@@ -254,5 +274,72 @@ fn test_apply_change() {
                 &canvas[(l - min) as usize..(r - min) as usize]
             );
         }
+    }
+}
+
+#[derive(TypedBuilder)]
+pub struct StoreConfig {
+    ncached_pages: usize,
+    ncached_files: usize,
+    #[builder(default = 22)] // 4MB file by default
+    file_nbit: u64,
+    rootfd: Fd,
+}
+
+pub struct Store {
+    cached_pages: lru::LruCache<u64, [u8; PAGE_SIZE as usize]>,
+    cached_files: lru::LruCache<u64, File>,
+    file_nbit: u64,
+    rootfd: Fd,
+}
+
+impl Store {
+    pub fn new(cfg: StoreConfig) -> Result<Self, StoreError> {
+        use std::num::NonZeroUsize;
+        if let Err(_) = flock(cfg.rootfd, FlockArg::LockExclusiveNonblock) {
+            return Err(StoreError::InitError("the store is busy".into()))
+        }
+        let rootfd = cfg.rootfd;
+        let file_nbit = cfg.file_nbit;
+        Ok(Self {
+            cached_pages: lru::LruCache::new(NonZeroUsize::new(cfg.ncached_pages).expect("non-zero cache size")),
+            cached_files: lru::LruCache::new(NonZeroUsize::new(cfg.ncached_files).expect("non-zero file num")),
+            file_nbit,
+            rootfd,
+        })
+    }
+}
+
+impl MemStore for Store {
+    fn get_ref(&self, offset: u64, length: u64) -> Option<Box<dyn LinearRef>> {
+        unimplemented!()
+    }
+
+    fn write(&self, _offset: u64, _change: &[u8]) {
+        unimplemented!()
+    }
+
+    fn id(&self) -> shale::SpaceID {
+        shale::INVALID_SPACE_ID
+    }
+}
+
+impl Drop for Store {
+    fn drop(&mut self) {
+        flock(self.rootfd, FlockArg::UnlockNonblock).ok();
+        nix::unistd::close(self.rootfd).ok();
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum StoreError {
+    System(nix::Error),
+    InitError(String),
+    WriterError,
+}
+
+impl From<nix::Error> for StoreError {
+    fn from(e: nix::Error) -> Self {
+        StoreError::System(e)
     }
 }
