@@ -286,12 +286,14 @@ pub struct StoreConfig {
     rootfd: Fd,
 }
 
-pub struct Store {
+struct StoreInner {
     cached_pages: lru::LruCache<u64, [u8; PAGE_SIZE as usize]>,
     cached_files: lru::LruCache<u64, File>,
     file_nbit: u64,
     rootfd: Fd,
 }
+
+pub struct Store(Arc<StoreInner>);
 
 impl Store {
     pub fn new(cfg: StoreConfig) -> Result<Self, StoreError> {
@@ -301,13 +303,18 @@ impl Store {
         }
         let rootfd = cfg.rootfd;
         let file_nbit = cfg.file_nbit;
-        Ok(Self {
+        Ok(Self(Arc::new(StoreInner {
             cached_pages: lru::LruCache::new(NonZeroUsize::new(cfg.ncached_pages).expect("non-zero cache size")),
             cached_files: lru::LruCache::new(NonZeroUsize::new(cfg.ncached_files).expect("non-zero file num")),
             file_nbit,
             rootfd,
-        })
+        })))
     }
+}
+
+pub struct StoreLightRef<'a> {
+    data: &'a [u8],
+    store: Arc<StoreInner>,
 }
 
 impl MemStore for Store {
@@ -324,7 +331,7 @@ impl MemStore for Store {
     }
 }
 
-impl Drop for Store {
+impl Drop for StoreInner {
     fn drop(&mut self) {
         flock(self.rootfd, FlockArg::UnlockNonblock).ok();
         nix::unistd::close(self.rootfd).ok();
