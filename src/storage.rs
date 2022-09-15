@@ -1,30 +1,22 @@
-use std::cell::RefCell;
+use std::cell::{RefCell, RefMut};
 use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use nix::fcntl::{flock, FlockArg};
-use shale::{DiskWrite, LinearRef, MemStore};
+use shale::{DiskWrite, MemStore, MemView};
 use typed_builder::TypedBuilder;
 
 use crate::file::{Fd, File};
 
 const PAGE_SIZE_NBIT: u64 = 12;
 const PAGE_SIZE: u64 = 1 << PAGE_SIZE_NBIT;
+const PAGE_MASK: u64 = PAGE_SIZE - 1;
 
-pub enum StoreSource {
-    Internal(StoreRev),
-    External(Arc<dyn MemStore>),
-}
-
-impl StoreSource {
-    fn as_mem_store(&self) -> &dyn MemStore {
-        match self {
-            Self::Internal(rev) => rev,
-            Self::External(store) => store.as_ref(),
-        }
-    }
+pub trait MemStoreR {
+    fn get_slice(&self, offset: u64, length: u64) -> Option<Vec<u8>>;
+    fn id(&self) -> shale::SpaceID;
 }
 
 type Page = [u8; PAGE_SIZE as usize];
@@ -49,6 +41,7 @@ impl DeltaPage {
     }
 }
 
+#[derive(Default)]
 struct StoreDelta(Vec<DeltaPage>);
 
 impl std::ops::Deref for StoreDelta {
@@ -59,7 +52,7 @@ impl std::ops::Deref for StoreDelta {
 }
 
 impl StoreDelta {
-    pub fn new(src: &dyn MemStore, writes: &[DiskWrite]) -> Option<Self> {
+    pub fn new(src: &dyn MemStoreR, writes: &[DiskWrite]) -> Option<Self> {
         let mut deltas = Vec::new();
         let mut widx: Vec<_> = (0..writes.len()).filter(|i| writes[*i].data.len() > 0).collect();
         if widx.is_empty() {
@@ -81,7 +74,7 @@ impl StoreDelta {
                     let off = p << PAGE_SIZE_NBIT;
                     deltas.push(DeltaPage(
                         p,
-                        src.get_ref(off, PAGE_SIZE).unwrap().deref().try_into().unwrap(),
+                        src.get_slice(off, PAGE_SIZE).unwrap().try_into().unwrap(),
                     ));
                 }
             };
@@ -131,34 +124,84 @@ impl StoreDelta {
     }
 }
 
-struct StoreRevInner {
-    prev: StoreSource,
+struct StoreRev {
+    prev: Arc<dyn MemStoreR>,
     deltas: StoreDelta,
 }
-
-#[derive(Clone)]
-pub struct StoreRev(Arc<StoreRevInner>);
 
 impl fmt::Debug for StoreRev {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "<StoreRev")?;
-        for d in self.0.deltas.iter() {
+        for d in self.deltas.iter() {
             write!(f, " 0x{:x}", d.0)?;
         }
         write!(f, ">\n")
     }
 }
 
-impl StoreRev {
-    pub fn apply_change(prev: StoreSource, writes: &[DiskWrite]) -> Option<StoreRev> {
-        let deltas = StoreDelta::new(
-            match &prev {
-                StoreSource::External(e) => e.as_ref(),
-                StoreSource::Internal(i) => i,
-            },
-            writes,
-        )?;
-        Some(Self(Arc::new(StoreRevInner { prev, deltas })))
+impl MemStoreR for StoreRev {
+    fn get_slice(&self, offset: u64, length: u64) -> Option<Vec<u8>> {
+        let mut start = offset;
+        let end = start + length;
+        let deltas = &self.deltas;
+        let mut l = 0;
+        let mut r = deltas.len();
+        // no dirty page, before or after all dirty pages
+        if r == 0 {
+            return self.prev.get_slice(start, end - start)
+        }
+        // otherwise, some dirty pages are covered by the range
+        while r - l > 1 {
+            let mid = (l + r) >> 1;
+            (*if start < deltas[mid].offset() { &mut r } else { &mut l }) = mid;
+        }
+        if start >= deltas[l].offset() + PAGE_SIZE {
+            l += 1
+        }
+        if l >= deltas.len() || end < deltas[l].offset() {
+            return self.prev.get_slice(start, end - start)
+        }
+        let mut data = Vec::new();
+        let p_off = std::cmp::min(end - deltas[l].offset(), PAGE_SIZE);
+        if start < deltas[l].offset() {
+            data.extend(self.prev.get_slice(start, deltas[l].offset() - start)?);
+            data.extend(&deltas[l].data()[..p_off as usize]);
+        } else {
+            data.extend(&deltas[l].data()[(start - deltas[l].offset()) as usize..p_off as usize]);
+        };
+        start = deltas[l].offset() + p_off;
+        while start < end {
+            l += 1;
+            if l >= deltas.len() || end < deltas[l].offset() {
+                data.extend(self.prev.get_slice(start, end - start)?);
+                break
+            }
+            if deltas[l].offset() > start {
+                data.extend(self.prev.get_slice(start, deltas[l].offset() - start)?);
+            }
+            if end < deltas[l].offset() + PAGE_SIZE {
+                data.extend(&deltas[l].data()[..(end - deltas[l].offset()) as usize]);
+                break
+            }
+            data.extend(deltas[l].data());
+            start = deltas[l].offset() + PAGE_SIZE;
+        }
+        assert!(data.len() == length as usize);
+        Some(data)
+    }
+
+    fn id(&self) -> shale::SpaceID {
+        self.prev.id()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct StoreRevShared(Arc<StoreRev>);
+
+impl StoreRevShared {
+    pub fn apply_change(prev: Arc<dyn MemStoreR>, writes: &[DiskWrite]) -> Option<StoreRevShared> {
+        let deltas = StoreDelta::new(prev.as_ref(), writes)?;
+        Some(Self(Arc::new(StoreRev { prev, deltas })))
     }
 }
 
@@ -174,83 +217,120 @@ impl<S: Clone + MemStore> std::ops::Deref for StoreRef<S> {
     }
 }
 
-impl<S: Clone + MemStore + 'static> LinearRef for StoreRef<S> {
+impl<S: Clone + MemStore + 'static> MemView for StoreRef<S> {
     fn mem_image(&self) -> Box<dyn MemStore> {
         Box::new(self.store.clone())
     }
 }
 
-impl MemStore for StoreRev {
-    fn get_ref(&self, offset: u64, length: u64) -> Option<Box<dyn LinearRef>> {
-        let mut start = offset;
-        let end = start + length;
-        let deltas = &self.0.deltas;
-        let mut l = 0;
-        let mut r = deltas.len();
-        // no dirty page, before or after all dirty pages
-        if r == 0 {
-            return self.0.prev.as_mem_store().get_ref(start, end - start)
-        }
-        // otherwise, some dirty pages are covered by the range
-        while r - l > 1 {
-            let mid = (l + r) >> 1;
-            (*if start < deltas[mid].offset() { &mut r } else { &mut l }) = mid;
-        }
-        if start >= deltas[l].offset() + PAGE_SIZE {
-            l += 1
-        }
-        if l >= deltas.len() || end < deltas[l].offset() {
-            return self.0.prev.as_mem_store().get_ref(start, end - start)
-        }
-        let mut data = Vec::new();
-        let p_off = std::cmp::min(end - deltas[l].offset(), PAGE_SIZE);
-        if start < deltas[l].offset() {
-            data.extend(
-                self.0
-                    .prev
-                    .as_mem_store()
-                    .get_ref(start, deltas[l].offset() - start)?
-                    .deref(),
-            );
-            data.extend(&deltas[l].data()[..p_off as usize]);
-        } else {
-            data.extend(&deltas[l].data()[(start - deltas[l].offset()) as usize..p_off as usize]);
-        };
-        start = deltas[l].offset() + p_off;
-        while start < end {
-            l += 1;
-            if l >= deltas.len() || end < deltas[l].offset() {
-                data.extend(self.0.prev.as_mem_store().get_ref(start, end - start)?.deref());
-                break
-            }
-            if deltas[l].offset() > start {
-                data.extend(
-                    self.0
-                        .prev
-                        .as_mem_store()
-                        .get_ref(start, deltas[l].offset() - start)?
-                        .deref(),
-                );
-            }
-            if end < deltas[l].offset() + PAGE_SIZE {
-                data.extend(&deltas[l].data()[..(end - deltas[l].offset()) as usize]);
-                break
-            }
-            data.extend(deltas[l].data());
-            start = deltas[l].offset() + PAGE_SIZE;
-        }
-        assert!(data.len() == length as usize);
-
+impl MemStore for StoreRevShared {
+    fn get_ref(&self, offset: u64, length: u64) -> Option<Box<dyn MemView>> {
         let store = self.clone();
+        let data = self.0.get_slice(offset, length)?;
         Some(Box::new(StoreRef { data, store }))
     }
 
     fn write(&self, _offset: u64, _change: &[u8]) {
-        panic!("StoreRev should not be written");
+        // StoreRevShared is a read-only view version of MemStore
+        unimplemented!()
     }
 
     fn id(&self) -> shale::SpaceID {
-        shale::INVALID_SPACE_ID
+        <StoreRev as MemStoreR>::id(&self.0)
+    }
+}
+
+#[derive(Clone)]
+pub struct StoreRevMut {
+    prev: Arc<dyn MemStoreR>,
+    deltas: Rc<RefCell<HashMap<u64, Box<Page>>>>,
+}
+
+impl StoreRevMut {
+    pub fn new(prev: Arc<dyn MemStoreR>) -> Self {
+        Self {
+            prev,
+            deltas: Rc::new(RefCell::new(HashMap::new())),
+        }
+    }
+
+    fn get_page_mut(&self, pid: u64) -> RefMut<[u8]> {
+        let mut deltas = self.deltas.borrow_mut();
+        if deltas.get(&pid).is_none() {
+            let page = Box::new(
+                self.prev
+                    .get_slice(pid << PAGE_SIZE_NBIT, PAGE_SIZE)
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+            );
+            deltas.insert(pid, page);
+        }
+        RefMut::map(deltas, |e| &mut e.get_mut(&pid).unwrap()[..])
+    }
+}
+
+impl MemStore for StoreRevMut {
+    fn get_ref(&self, offset: u64, length: u64) -> Option<Box<dyn MemView>> {
+        let data = if length == 0 {
+            Vec::new()
+        } else {
+            let end = offset + length - 1;
+            let s_pid = offset >> PAGE_SIZE_NBIT;
+            let s_off = (offset & PAGE_MASK) as usize;
+            let e_pid = end >> PAGE_SIZE_NBIT;
+            let e_off = (end & PAGE_MASK) as usize;
+            let deltas = self.deltas.borrow();
+            if s_pid == e_pid {
+                match deltas.get(&s_pid) {
+                    Some(p) => p[s_off..e_off + 1].to_vec(),
+                    None => self.prev.get_slice(offset, length)?,
+                }
+            } else {
+                let mut data = match deltas.get(&s_pid) {
+                    Some(p) => p[s_off..].to_vec(),
+                    None => self.prev.get_slice(offset, PAGE_SIZE - s_off as u64)?,
+                };
+                for p in s_pid + 1..e_pid {
+                    match deltas.get(&p) {
+                        Some(p) => data.extend(&**p),
+                        None => data.extend(&self.prev.get_slice(p << PAGE_SIZE_NBIT, PAGE_SIZE)?),
+                    };
+                }
+                match deltas.get(&e_pid) {
+                    Some(p) => data.extend(&p[..e_off + 1]),
+                    None => data.extend(self.prev.get_slice(e_pid << PAGE_SIZE_NBIT, e_off as u64 + 1)?),
+                }
+                data
+            }
+        };
+        let store = self.clone();
+        Some(Box::new(StoreRef { data, store }))
+    }
+
+    fn write(&self, offset: u64, mut change: &[u8]) {
+        let length = change.len() as u64;
+        let end = offset + length - 1;
+        let s_pid = offset >> PAGE_SIZE_NBIT;
+        let s_off = (offset & PAGE_MASK) as usize;
+        let e_pid = end >> PAGE_SIZE_NBIT;
+        let e_off = (end & PAGE_MASK) as usize;
+        if s_pid == e_pid {
+            self.get_page_mut(s_pid)[s_off..e_off + 1].copy_from_slice(change)
+        } else {
+            let len = PAGE_SIZE as usize - s_off;
+            self.get_page_mut(s_pid)[s_off..].copy_from_slice(&change[..len]);
+            change = &change[..len];
+            for p in s_pid + 1..e_pid {
+                self.get_page_mut(p).copy_from_slice(&change[..PAGE_SIZE as usize]);
+                change = &change[..PAGE_SIZE as usize];
+            }
+            self.get_page_mut(e_pid)[..e_off + 1].copy_from_slice(change);
+        }
+    }
+
+    fn id(&self) -> shale::SpaceID {
+        self.prev.id()
     }
 }
 
@@ -263,16 +343,9 @@ impl ZeroStore {
     }
 }
 
-impl MemStore for ZeroStore {
-    fn get_ref(&self, _: u64, length: u64) -> Option<Box<dyn LinearRef>> {
-        Some(Box::new(StoreRef {
-            data: vec![0; length as usize],
-            store: self.clone(),
-        }))
-    }
-
-    fn write(&self, _: u64, _: &[u8]) {
-        panic!("ZeroStore should not be written");
+impl MemStoreR for ZeroStore {
+    fn get_slice(&self, _: u64, length: u64) -> Option<Vec<u8>> {
+        Some(vec![0; length as usize])
     }
 
     fn id(&self) -> shale::SpaceID {
@@ -306,7 +379,7 @@ fn test_apply_change() {
             });
         }
         let z = Arc::new(ZeroStore::new());
-        let rev = StoreRev::apply_change(StoreSource::External(z), &writes).unwrap();
+        let rev = StoreRevShared::apply_change(z, &writes).unwrap();
         println!("{:?}", rev);
         assert_eq!(rev.get_ref(min, max - min).unwrap().deref(), &canvas);
         for _ in 0..2 * n {
@@ -330,7 +403,7 @@ pub struct StoreConfig {
     space_id: shale::SpaceID,
 }
 
-struct StoreInner {
+struct CacheStoreInner {
     cached_pages: lru::LruCache<u64, Box<Page>>,
     pinned_pages: HashMap<u64, (usize, Box<Page>)>,
     cached_files: lru::LruCache<u64, File>,
@@ -339,12 +412,12 @@ struct StoreInner {
 }
 
 #[derive(Clone)]
-pub struct Store {
-    inner: Rc<RefCell<StoreInner>>,
+pub struct CacheStore {
+    inner: Rc<RefCell<CacheStoreInner>>,
     space_id: shale::SpaceID,
 }
 
-impl Store {
+impl CacheStore {
     pub fn new(cfg: StoreConfig) -> Result<Self, StoreError> {
         use std::num::NonZeroUsize;
         if let Err(_) = flock(cfg.rootfd, FlockArg::LockExclusiveNonblock) {
@@ -354,7 +427,7 @@ impl Store {
         let file_nbit = cfg.file_nbit;
         let space_id = cfg.space_id;
         Ok(Self {
-            inner: Rc::new(RefCell::new(StoreInner {
+            inner: Rc::new(RefCell::new(CacheStoreInner {
                 cached_pages: lru::LruCache::new(NonZeroUsize::new(cfg.ncached_pages).expect("non-zero cache size")),
                 pinned_pages: HashMap::new(),
                 cached_files: lru::LruCache::new(NonZeroUsize::new(cfg.ncached_files).expect("non-zero file num")),
@@ -366,7 +439,7 @@ impl Store {
     }
 }
 
-impl StoreInner {
+impl CacheStoreInner {
     fn fetch_page(&mut self, pid: u64) -> Result<Box<Page>, StoreError> {
         let file_size = 1 << self.file_nbit;
         let fid = (pid << PAGE_SIZE_NBIT) >> self.file_nbit;
@@ -434,57 +507,57 @@ impl StoreInner {
     }
 }
 
-pub struct StoreLightRef<'a> {
+struct PageRef {
     pid: u64,
-    data: &'a [u8],
-    store: Store,
+    data: &'static [u8],
+    store: CacheStore,
 }
 
-impl<'a> std::ops::Deref for StoreLightRef<'a> {
+impl<'a> std::ops::Deref for PageRef {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
         self.data
     }
 }
 
-impl<'a> LinearRef for StoreLightRef<'a> {
-    fn mem_image(&self) -> Box<dyn MemStore> {
-        Box::new(self.store.clone())
+impl PageRef {
+    fn new(pid: u64, store: &CacheStore) -> Option<Self> {
+        Some(Self {
+            pid,
+            data: store.inner.borrow_mut().pin_page(pid).ok()?,
+            store: store.clone(),
+        })
     }
 }
 
-impl<'a> Drop for StoreLightRef<'a> {
+impl Drop for PageRef {
     fn drop(&mut self) {
         self.store.inner.borrow_mut().unpin_page(self.pid);
     }
 }
 
-impl MemStore for Store {
-    fn get_ref(&self, offset: u64, length: u64) -> Option<Box<dyn LinearRef>> {
-        let pid = offset >> PAGE_SIZE_NBIT;
-        let p_off = offset & (PAGE_SIZE - 1);
-        let slice = self.inner.borrow_mut().pin_page(pid).ok()?;
-        Some(Box::new(StoreLightRef {
-            pid,
-            data: &slice[p_off as usize..(p_off + length) as usize],
-            store: self.clone(),
-        }))
-    }
-
-    fn write(&self, offset: u64, change: &[u8]) {
-        let pages = StoreDelta::new(
-            self,
-            &[DiskWrite {
-                space_off: offset,
-                space_id: 0, // ignored by StoreDelta::new
-                data: change.into(),
-            }],
-        )
-        .unwrap();
-        let mut inner = self.inner.borrow_mut();
-        for DeltaPage(pid, page) in &*pages {
-            inner.update_page(*pid, page);
+impl MemStoreR for CacheStore {
+    fn get_slice(&self, offset: u64, length: u64) -> Option<Vec<u8>> {
+        if length == 0 {
+            return Some(Default::default())
         }
+        let end = offset + length - 1;
+        let s_pid = offset >> PAGE_SIZE_NBIT;
+        let s_off = (offset & PAGE_MASK) as usize;
+        let e_pid = end >> PAGE_SIZE_NBIT;
+        let e_off = (end & PAGE_MASK) as usize;
+        if s_pid == e_pid {
+            return PageRef::new(s_pid, self).map(|e| e[s_off..e_off + 1].to_vec())
+        }
+        let mut data: Vec<u8> = Vec::new();
+        {
+            data.extend(&PageRef::new(s_pid, self)?[s_off..]);
+            for p in s_pid + 1..e_pid {
+                data.extend(&PageRef::new(p, self)?[..]);
+            }
+            data.extend(&PageRef::new(e_pid, self)?[..e_off + 1]);
+        }
+        Some(data)
     }
 
     fn id(&self) -> shale::SpaceID {
@@ -492,7 +565,7 @@ impl MemStore for Store {
     }
 }
 
-impl Drop for StoreInner {
+impl Drop for CacheStoreInner {
     fn drop(&mut self) {
         flock(self.rootfd, FlockArg::UnlockNonblock).ok();
         nix::unistd::close(self.rootfd).ok();
