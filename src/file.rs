@@ -75,8 +75,6 @@ impl Drop for File {
     }
 }
 
-pub type ArcFile = std::sync::Arc<File>;
-
 fn touch_dir(dirname: &str, rootfd: Fd) -> Result<Fd, Errno> {
     use nix::sys::stat::mkdirat;
     if mkdirat(rootfd, dirname, Mode::S_IRUSR | Mode::S_IWUSR | Mode::S_IXUSR).is_err() {

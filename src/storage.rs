@@ -1,11 +1,12 @@
 use std::cell::{RefCell, RefMut};
 use std::collections::HashMap;
 use std::fmt;
+use std::num::NonZeroUsize;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use nix::fcntl::{flock, FlockArg};
-use shale::{DiskWrite, MemStore, MemView};
+use shale::{DiskWrite, MemStore, MemView, SpaceID};
 use typed_builder::TypedBuilder;
 
 use crate::file::{Fd, File};
@@ -16,7 +17,7 @@ const PAGE_MASK: u64 = PAGE_SIZE - 1;
 
 pub trait MemStoreR {
     fn get_slice(&self, offset: u64, length: u64) -> Option<Vec<u8>>;
-    fn id(&self) -> shale::SpaceID;
+    fn id(&self) -> SpaceID;
 }
 
 type Page = [u8; PAGE_SIZE as usize];
@@ -190,7 +191,7 @@ impl MemStoreR for StoreRev {
         Some(data)
     }
 
-    fn id(&self) -> shale::SpaceID {
+    fn id(&self) -> SpaceID {
         self.prev.id()
     }
 }
@@ -235,7 +236,7 @@ impl MemStore for StoreRevShared {
         unimplemented!()
     }
 
-    fn id(&self) -> shale::SpaceID {
+    fn id(&self) -> SpaceID {
         <StoreRev as MemStoreR>::id(&self.0)
     }
 }
@@ -329,7 +330,7 @@ impl MemStore for StoreRevMut {
         }
     }
 
-    fn id(&self) -> shale::SpaceID {
+    fn id(&self) -> SpaceID {
         self.prev.id()
     }
 }
@@ -348,7 +349,7 @@ impl MemStoreR for ZeroStore {
         Some(vec![0; length as usize])
     }
 
-    fn id(&self) -> shale::SpaceID {
+    fn id(&self) -> SpaceID {
         shale::INVALID_SPACE_ID
     }
 }
@@ -399,60 +400,47 @@ pub struct StoreConfig {
     ncached_files: usize,
     #[builder(default = 22)] // 4MB file by default
     file_nbit: u64,
+    space_id: SpaceID,
     rootfd: Fd,
-    space_id: shale::SpaceID,
 }
 
-struct CacheStoreInner {
+struct CachedSpaceInner {
     cached_pages: lru::LruCache<u64, Box<Page>>,
     pinned_pages: HashMap<u64, (usize, Box<Page>)>,
-    cached_files: lru::LruCache<u64, File>,
-    file_nbit: u64,
-    rootfd: Fd,
+    files: Rc<FilePool>,
+    disk_buffer: Rc<DiskBuffer>,
 }
 
 #[derive(Clone)]
-pub struct CacheStore {
-    inner: Rc<RefCell<CacheStoreInner>>,
-    space_id: shale::SpaceID,
+pub struct CachedSpace {
+    inner: Rc<RefCell<CachedSpaceInner>>,
+    space_id: SpaceID,
 }
 
-impl CacheStore {
-    pub fn new(cfg: StoreConfig) -> Result<Self, StoreError> {
-        use std::num::NonZeroUsize;
-        if let Err(_) = flock(cfg.rootfd, FlockArg::LockExclusiveNonblock) {
-            return Err(StoreError::InitError("the store is busy".into()))
-        }
-        let rootfd = cfg.rootfd;
-        let file_nbit = cfg.file_nbit;
+impl CachedSpace {
+    pub fn new(cfg: &StoreConfig) -> Result<Self, StoreError> {
         let space_id = cfg.space_id;
+        let files = Rc::new(FilePool::new(cfg)?);
         Ok(Self {
-            inner: Rc::new(RefCell::new(CacheStoreInner {
+            inner: Rc::new(RefCell::new(CachedSpaceInner {
                 cached_pages: lru::LruCache::new(NonZeroUsize::new(cfg.ncached_pages).expect("non-zero cache size")),
                 pinned_pages: HashMap::new(),
-                cached_files: lru::LruCache::new(NonZeroUsize::new(cfg.ncached_files).expect("non-zero file num")),
-                file_nbit,
-                rootfd,
+                files,
+                disk_buffer: Rc::new(DiskBuffer::new()),
             })),
             space_id,
         })
     }
 }
 
-impl CacheStoreInner {
+impl CachedSpaceInner {
     fn fetch_page(&mut self, pid: u64) -> Result<Box<Page>, StoreError> {
-        let file_size = 1 << self.file_nbit;
-        let fid = (pid << PAGE_SIZE_NBIT) >> self.file_nbit;
-        let file = match self.cached_files.get(&fid) {
-            Some(f) => f,
-            None => {
-                self.cached_files.put(
-                    fid,
-                    File::new(fid, file_size, self.rootfd, false).map_err(StoreError::System)?,
-                );
-                self.cached_files.peek(&fid).unwrap()
-            }
-        };
+        if let Some(p) = self.disk_buffer.get_page(pid) {
+            return Ok(Box::new(p.clone()))
+        }
+        let file_nbit = self.files.get_file_nbit();
+        let file_size = 1 << file_nbit;
+        let file = self.files.get_file((pid << PAGE_SIZE_NBIT) >> file_nbit)?;
         let mut page: Page = [0; PAGE_SIZE as usize];
         nix::sys::uio::pread(file.get_fd(), &mut page, (pid & (1 - file_size)) as nix::libc::off_t)
             .map_err(StoreError::System)?;
@@ -510,7 +498,7 @@ impl CacheStoreInner {
 struct PageRef {
     pid: u64,
     data: &'static [u8],
-    store: CacheStore,
+    store: CachedSpace,
 }
 
 impl<'a> std::ops::Deref for PageRef {
@@ -521,7 +509,7 @@ impl<'a> std::ops::Deref for PageRef {
 }
 
 impl PageRef {
-    fn new(pid: u64, store: &CacheStore) -> Option<Self> {
+    fn new(pid: u64, store: &CachedSpace) -> Option<Self> {
         Some(Self {
             pid,
             data: store.inner.borrow_mut().pin_page(pid).ok()?,
@@ -536,7 +524,7 @@ impl Drop for PageRef {
     }
 }
 
-impl MemStoreR for CacheStore {
+impl MemStoreR for CachedSpace {
     fn get_slice(&self, offset: u64, length: u64) -> Option<Vec<u8>> {
         if length == 0 {
             return Some(Default::default())
@@ -560,15 +548,94 @@ impl MemStoreR for CacheStore {
         Some(data)
     }
 
-    fn id(&self) -> shale::SpaceID {
+    fn id(&self) -> SpaceID {
         self.space_id
     }
 }
 
-impl Drop for CacheStoreInner {
+pub struct FilePool {
+    files: RefCell<lru::LruCache<u64, Rc<File>>>,
+    file_nbit: u64,
+    rootfd: Fd,
+}
+
+impl FilePool {
+    pub fn new(cfg: &StoreConfig) -> Result<Self, StoreError> {
+        let rootfd = cfg.rootfd;
+        let file_nbit = cfg.file_nbit;
+        if let Err(_) = flock(rootfd, FlockArg::LockExclusiveNonblock) {
+            return Err(StoreError::InitError("the store is busy".into()))
+        }
+        Ok(Self {
+            files: RefCell::new(lru::LruCache::new(
+                NonZeroUsize::new(cfg.ncached_files).expect("non-zero file num"),
+            )),
+            file_nbit,
+            rootfd,
+        })
+    }
+
+    fn get_file(&self, fid: u64) -> Result<Rc<File>, StoreError> {
+        let mut files = self.files.borrow_mut();
+        let file_size = 1 << self.file_nbit;
+        Ok(match files.get(&fid) {
+            Some(f) => f.clone(),
+            None => {
+                files.put(
+                    fid,
+                    Rc::new(File::new(fid, file_size, self.rootfd, false).map_err(StoreError::System)?),
+                );
+                files.peek(&fid).unwrap().clone()
+            }
+        })
+    }
+
+    fn get_file_nbit(&self) -> u64 {
+        self.file_nbit
+    }
+}
+
+impl Drop for FilePool {
     fn drop(&mut self) {
         flock(self.rootfd, FlockArg::UnlockNonblock).ok();
         nix::unistd::close(self.rootfd).ok();
+    }
+}
+
+pub struct DiskBuffer {
+    pending: HashMap<u64, Box<Page>>,
+}
+
+impl DiskBuffer {
+    fn new() -> Self {
+        Self {
+            pending: HashMap::new(),
+        }
+    }
+
+    fn get_page(&self, pid: u64) -> Option<&Page> {
+        self.pending.get(&pid).map(|e| e.as_ref())
+    }
+}
+
+pub struct DiskStore {
+    disk_buffer: Rc<DiskBuffer>,
+    file_pools: [Option<Rc<FilePool>>; 255],
+}
+
+impl DiskStore {
+    pub fn new() -> Self {
+        const INIT: Option<Rc<FilePool>> = None;
+        Self {
+            disk_buffer: Rc::new(DiskBuffer::new()),
+            file_pools: [INIT; 255],
+        }
+    }
+
+    pub fn reg_cached_space(&mut self, space: &CachedSpace) {
+        let mut inner = space.inner.borrow_mut();
+        inner.disk_buffer = self.disk_buffer.clone();
+        self.file_pools[space.id() as usize] = Some(inner.files.clone())
     }
 }
 
