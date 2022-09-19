@@ -5,8 +5,10 @@ use std::num::NonZeroUsize;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use aiofut::{AIOBuilder, AIOManager};
 use nix::fcntl::{flock, FlockArg};
-use shale::{DiskWrite, MemStore, MemView, SpaceID};
+use shale::{MemStore, MemView, SpaceID};
+use tokio::sync::{mpsc, oneshot};
 use typed_builder::TypedBuilder;
 
 use crate::file::{Fd, File};
@@ -22,8 +24,13 @@ pub trait MemStoreR {
 
 type Page = [u8; PAGE_SIZE as usize];
 
+pub struct SpaceWrite {
+    offset: u64,
+    data: Box<[u8]>,
+}
+
 /// Basic copy-on-write item in the linear storage space for multi-versioning.
-struct DeltaPage(u64, Page);
+pub struct DeltaPage(u64, Page);
 
 impl DeltaPage {
     #[inline(always)]
@@ -43,7 +50,13 @@ impl DeltaPage {
 }
 
 #[derive(Default)]
-struct StoreDelta(Vec<DeltaPage>);
+pub struct StoreDelta(Vec<DeltaPage>);
+
+impl fmt::Debug for StoreDelta {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+        write!(f, "<StoreDelta>")
+    }
+}
 
 impl std::ops::Deref for StoreDelta {
     type Target = [DeltaPage];
@@ -53,7 +66,7 @@ impl std::ops::Deref for StoreDelta {
 }
 
 impl StoreDelta {
-    pub fn new(src: &dyn MemStoreR, writes: &[DiskWrite]) -> Option<Self> {
+    pub fn new(src: &dyn MemStoreR, writes: &[SpaceWrite]) -> Option<Self> {
         let mut deltas = Vec::new();
         let mut widx: Vec<_> = (0..writes.len()).filter(|i| writes[*i].data.len() > 0).collect();
         if widx.is_empty() {
@@ -62,12 +75,12 @@ impl StoreDelta {
         }
 
         // sort by the starting point
-        widx.sort_by_key(|i| writes[*i].space_off);
+        widx.sort_by_key(|i| writes[*i].offset);
 
         let mut witer = widx.into_iter();
         let w0 = &writes[witer.next().unwrap()];
-        let mut head = w0.space_off >> PAGE_SIZE_NBIT;
-        let mut tail = (w0.space_off + w0.data.len() as u64 - 1) >> PAGE_SIZE_NBIT;
+        let mut head = w0.offset >> PAGE_SIZE_NBIT;
+        let mut tail = (w0.offset + w0.data.len() as u64 - 1) >> PAGE_SIZE_NBIT;
 
         macro_rules! create_dirty_pages {
             ($l: expr, $r: expr) => {
@@ -83,10 +96,10 @@ impl StoreDelta {
 
         for i in witer {
             let w = &writes[i];
-            let ep = (w.space_off + w.data.len() as u64 - 1) >> PAGE_SIZE_NBIT;
-            let wp = w.space_off >> PAGE_SIZE_NBIT;
+            let ep = (w.offset + w.data.len() as u64 - 1) >> PAGE_SIZE_NBIT;
+            let wp = w.offset >> PAGE_SIZE_NBIT;
             if wp > tail {
-                // all following writes won't go back past w.space_off, so the previous continous
+                // all following writes won't go back past w.offset, so the previous continous
                 // write area is determined
                 create_dirty_pages!(head, tail);
                 head = wp;
@@ -101,13 +114,13 @@ impl StoreDelta {
             let mut r = deltas.len();
             while r - l > 1 {
                 let mid = (l + r) >> 1;
-                (*if w.space_off < deltas[mid].offset() {
+                (*if w.offset < deltas[mid].offset() {
                     &mut r
                 } else {
                     &mut l
                 }) = mid;
             }
-            let off = (w.space_off - deltas[l].offset()) as usize;
+            let off = (w.offset - deltas[l].offset()) as usize;
             let len = std::cmp::min(psize - off, w.data.len());
             deltas[l].data_mut()[off..off + len].copy_from_slice(&w.data[..len]);
             let mut data = &w.data[len..];
@@ -200,7 +213,7 @@ impl MemStoreR for StoreRev {
 pub struct StoreRevShared(Arc<StoreRev>);
 
 impl StoreRevShared {
-    pub fn apply_change(prev: Arc<dyn MemStoreR>, writes: &[DiskWrite]) -> Option<StoreRevShared> {
+    pub fn apply_change(prev: Arc<dyn MemStoreR>, writes: &[SpaceWrite]) -> Option<StoreRevShared> {
         let deltas = StoreDelta::new(prev.as_ref(), writes)?;
         Some(Self(Arc::new(StoreRev { prev, deltas })))
     }
@@ -373,11 +386,7 @@ fn test_apply_change() {
                 canvas[(idx - min) as usize] = *byte;
             }
             println!("[0x{:x}, 0x{:x})", l, r);
-            writes.push(DiskWrite {
-                space_id: 0x0,
-                space_off: l,
-                data,
-            });
+            writes.push(SpaceWrite { offset: l, data });
         }
         let z = Arc::new(ZeroStore::new());
         let rev = StoreRevShared::apply_change(z, &writes).unwrap();
@@ -408,7 +417,7 @@ struct CachedSpaceInner {
     cached_pages: lru::LruCache<u64, Box<Page>>,
     pinned_pages: HashMap<u64, (usize, Box<Page>)>,
     files: Rc<FilePool>,
-    disk_buffer: Rc<DiskBuffer>,
+    disk_buffer: DiskBufferRequester,
 }
 
 #[derive(Clone)]
@@ -426,7 +435,7 @@ impl CachedSpace {
                 cached_pages: lru::LruCache::new(NonZeroUsize::new(cfg.ncached_pages).expect("non-zero cache size")),
                 pinned_pages: HashMap::new(),
                 files,
-                disk_buffer: Rc::new(DiskBuffer::new()),
+                disk_buffer: DiskBufferRequester::default(),
             })),
             space_id,
         })
@@ -434,9 +443,9 @@ impl CachedSpace {
 }
 
 impl CachedSpaceInner {
-    fn fetch_page(&mut self, pid: u64) -> Result<Box<Page>, StoreError> {
-        if let Some(p) = self.disk_buffer.get_page(pid) {
-            return Ok(Box::new(p.clone()))
+    fn fetch_page(&mut self, space_id: SpaceID, pid: u64) -> Result<Box<Page>, StoreError> {
+        if let Some(p) = self.disk_buffer.get_page(space_id, pid) {
+            return Ok(Box::new((*p).clone()))
         }
         let file_nbit = self.files.get_file_nbit();
         let file_size = 1 << file_nbit;
@@ -447,7 +456,7 @@ impl CachedSpaceInner {
         Ok(Box::new(page))
     }
 
-    fn pin_page(&mut self, pid: u64) -> Result<&'static [u8], StoreError> {
+    fn pin_page(&mut self, space_id: SpaceID, pid: u64) -> Result<&'static [u8], StoreError> {
         let base = match self.pinned_pages.get_mut(&pid) {
             Some(mut e) => {
                 e.0 += 1;
@@ -456,7 +465,7 @@ impl CachedSpaceInner {
             None => {
                 let page = match self.cached_pages.pop(&pid) {
                     Some(p) => p,
-                    None => self.fetch_page(pid)?,
+                    None => self.fetch_page(space_id, pid)?,
                 };
                 let ptr = page.as_ptr();
                 self.pinned_pages.insert(pid, (1, page));
@@ -512,7 +521,7 @@ impl PageRef {
     fn new(pid: u64, store: &CachedSpace) -> Option<Self> {
         Some(Self {
             pid,
-            data: store.inner.borrow_mut().pin_page(pid).ok()?,
+            data: store.inner.borrow_mut().pin_page(store.space_id, pid).ok()?,
             store: store.clone(),
         })
     }
@@ -553,14 +562,14 @@ impl MemStoreR for CachedSpace {
     }
 }
 
-pub struct FilePool {
+struct FilePool {
     files: RefCell<lru::LruCache<u64, Rc<File>>>,
     file_nbit: u64,
     rootfd: Fd,
 }
 
 impl FilePool {
-    pub fn new(cfg: &StoreConfig) -> Result<Self, StoreError> {
+    fn new(cfg: &StoreConfig) -> Result<Self, StoreError> {
         let rootfd = cfg.rootfd;
         let file_nbit = cfg.file_nbit;
         if let Err(_) = flock(rootfd, FlockArg::LockExclusiveNonblock) {
@@ -602,40 +611,215 @@ impl Drop for FilePool {
     }
 }
 
+#[derive(Debug)]
+pub struct BufferWrite {
+    pub space_id: SpaceID,
+    pub delta: StoreDelta,
+}
+
+#[derive(Debug)]
+enum BufferCmd {
+    GetPage((SpaceID, u64), oneshot::Sender<Option<Arc<Page>>>),
+    WriteBatch(Vec<BufferWrite>),
+    Shutdown,
+}
+
+#[derive(TypedBuilder)]
+pub struct DiskBufferConfig {
+    #[builder(default = 4096)]
+    max_buffered: usize,
+    #[builder(default = 4096)]
+    max_pending: usize,
+    #[builder(default = 128)]
+    max_aio_requests: u32,
+    #[builder(default = 128)]
+    max_aio_response: u16,
+    #[builder(default = 128)]
+    max_aio_submit: usize,
+}
+
+struct PendingPage {
+    data: Arc<Page>,
+    file_nbit: u64,
+    updated: bool,
+}
+
 pub struct DiskBuffer {
-    pending: HashMap<u64, Box<Page>>,
+    pending: HashMap<(SpaceID, u64), PendingPage>,
+    inbound: mpsc::Receiver<BufferCmd>,
+    requester: DiskBufferRequester,
+    fc_notifier: Option<oneshot::Sender<()>>,
+    fc_blocker: Option<oneshot::Receiver<()>>,
+    file_pools: [Option<Rc<FilePool>>; 255],
+    aiomgr: AIOManager,
+    max_pending: usize,
+    local_pool: Rc<tokio::task::LocalSet>,
 }
 
 impl DiskBuffer {
-    fn new() -> Self {
-        Self {
-            pending: HashMap::new(),
-        }
-    }
-
-    fn get_page(&self, pid: u64) -> Option<&Page> {
-        self.pending.get(&pid).map(|e| e.as_ref())
-    }
-}
-
-pub struct DiskStore {
-    disk_buffer: Rc<DiskBuffer>,
-    file_pools: [Option<Rc<FilePool>>; 255],
-}
-
-impl DiskStore {
-    pub fn new() -> Self {
+    pub fn new(cfg: &DiskBufferConfig) -> Option<Self> {
         const INIT: Option<Rc<FilePool>> = None;
-        Self {
-            disk_buffer: Rc::new(DiskBuffer::new()),
+
+        let (sender, inbound) = mpsc::channel(cfg.max_buffered);
+        let requester = DiskBufferRequester::new(sender);
+        let max_pending = cfg.max_pending;
+        let aiomgr = AIOBuilder::default()
+            .max_events(cfg.max_aio_requests)
+            .max_nwait(cfg.max_aio_response)
+            .max_nbatched(cfg.max_aio_submit)
+            .build()
+            .ok()?;
+
+        Some(Self {
+            pending: HashMap::new(),
+            max_pending,
+            inbound,
+            requester,
+            fc_notifier: None,
+            fc_blocker: None,
             file_pools: [INIT; 255],
-        }
+            aiomgr,
+            local_pool: Rc::new(tokio::task::LocalSet::new()),
+        })
     }
 
     pub fn reg_cached_space(&mut self, space: &CachedSpace) {
         let mut inner = space.inner.borrow_mut();
-        inner.disk_buffer = self.disk_buffer.clone();
+        inner.disk_buffer = self.requester().clone();
         self.file_pools[space.id() as usize] = Some(inner.files.clone())
+    }
+
+    unsafe fn get_longlive_self(&mut self) -> &'static mut Self {
+        std::mem::transmute::<&mut Self, &'static mut Self>(self)
+    }
+
+    fn schedule_write(&mut self, page_key: (SpaceID, u64)) {
+        let p = self.pending.get(&page_key).unwrap();
+        let offset = page_key.1 << PAGE_SIZE_NBIT;
+        let fid = offset >> p.file_nbit;
+        let fmask = (1 << p.file_nbit) - 1;
+        let file = self.file_pools[page_key.0 as usize]
+            .as_ref()
+            .unwrap()
+            .get_file(fid)
+            .unwrap();
+        let fut = self
+            .aiomgr
+            .write(file.get_fd(), offset & fmask, Box::new(*p.data), None);
+        let s = unsafe { self.get_longlive_self() };
+        self.local_pool.spawn_local(async move {
+            let (res, _) = fut.await;
+            res.unwrap();
+            s.finish_write(page_key);
+        });
+    }
+
+    fn finish_write(&mut self, page_key: (SpaceID, u64)) {
+        use std::collections::hash_map::Entry::*;
+        match self.pending.entry(page_key) {
+            Occupied(e) => {
+                if e.get().updated {
+                    // write again
+                    self.schedule_write(page_key);
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    async fn process(&mut self, req: BufferCmd) -> bool {
+        use std::collections::hash_map::Entry::*;
+        match req {
+            BufferCmd::Shutdown => return false,
+            BufferCmd::GetPage(page_key, tx) => tx.send(self.pending.get(&page_key).map(|e| e.data.clone())).unwrap(),
+            BufferCmd::WriteBatch(writes) => {
+                for BufferWrite { space_id, delta } in writes {
+                    for w in delta.0 {
+                        let page_key = (space_id, w.0);
+                        match self.pending.entry(page_key) {
+                            Occupied(mut e) => {
+                                let e = e.get_mut();
+                                e.data = Arc::new(w.1);
+                                e.updated = true;
+                            }
+                            Vacant(e) => {
+                                let file_nbit = self.file_pools[page_key.0 as usize].as_ref().unwrap().file_nbit;
+                                e.insert(PendingPage {
+                                    data: Arc::new(w.1),
+                                    file_nbit,
+                                    updated: false,
+                                });
+                                self.schedule_write(page_key);
+                            }
+                        }
+                    }
+                }
+                if self.pending.len() >= self.max_pending {
+                    let (tx, rx) = oneshot::channel();
+                    self.fc_notifier = Some(tx);
+                    self.fc_blocker = Some(rx);
+                }
+            }
+        }
+        true
+    }
+
+    #[tokio::main(flavor = "current_thread")]
+    pub async fn run(mut self) {
+        self.local_pool
+            .clone()
+            .run_until(async {
+                loop {
+                    if let Some(fc) = self.fc_blocker.take() {
+                        // flow control, wait until ready
+                        fc.await.unwrap();
+                    }
+                    let req = self.inbound.recv().await.unwrap();
+                    if !self.process(req).await {
+                        break
+                    }
+                }
+            })
+            .await;
+    }
+
+    pub fn requester(&self) -> &DiskBufferRequester {
+        &self.requester
+    }
+}
+
+#[derive(Clone)]
+pub struct DiskBufferRequester {
+    sender: mpsc::Sender<BufferCmd>,
+}
+
+impl Default for DiskBufferRequester {
+    fn default() -> Self {
+        Self {
+            sender: mpsc::channel(0).0,
+        }
+    }
+}
+
+impl DiskBufferRequester {
+    fn new(sender: mpsc::Sender<BufferCmd>) -> Self {
+        Self { sender }
+    }
+
+    pub fn get_page(&self, space_id: SpaceID, pid: u64) -> Option<Arc<Page>> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.sender
+            .blocking_send(BufferCmd::GetPage((space_id, pid), resp_tx))
+            .unwrap();
+        resp_rx.blocking_recv().unwrap()
+    }
+
+    pub fn write(&self, batch: Vec<BufferWrite>) {
+        self.sender.blocking_send(BufferCmd::WriteBatch(batch)).unwrap()
+    }
+
+    pub fn shutdown(&self) {
+        self.sender.blocking_send(BufferCmd::Shutdown).unwrap()
     }
 }
 

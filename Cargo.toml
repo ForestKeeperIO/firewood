@@ -14,6 +14,7 @@ lru = "0.8.0"
 libaio-futures = "0.2.2"
 nix = "0.25.0"
 typed-builder = "0.10.0"
+tokio = { version = "1.21.1", features = ["rt", "sync", "macros"] }
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
