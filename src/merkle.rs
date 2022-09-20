@@ -1,5 +1,4 @@
 use enum_as_inner::EnumAsInner;
-use parking_lot::{Mutex, MutexGuard};
 use sha3::Digest;
 use shale::{MemStore, MummyItem, ObjPtr, ObjRef, ShaleError, ShaleStore};
 
@@ -423,21 +422,27 @@ fn test_merkle_node_encoding() {
     }
 }
 
-struct MerkleInner<S: ShaleStore> {
+macro_rules! write_node {
+    ($self: ident, $r: expr, $modify: expr, $parents: expr, $deleted: expr) => {
+        if let None = $r.write($modify) {
+            $self.set_parent($self.new_node($r.clone())?.as_ptr(), $parents);
+            $deleted.push($r.as_ptr());
+            true
+        } else {
+            false
+        }
+    };
+}
+
+pub struct Merkle<S: ShaleStore> {
     header: RefCell<ObjRef<'static, MerkleHeader>>,
     store: S,
 }
 
-impl<S: ShaleStore> MerkleInner<S> {
+impl<S: ShaleStore> Merkle<S> {
     fn get_node(&self, ptr: ObjPtr<Node>) -> Result<ObjRef<Node>, MerkleError> {
         self.store.get_item(ptr).map_err(MerkleError::Shale)
     }
-}
-
-pub struct Merkle<S: ShaleStore>(Mutex<MerkleInner<S>>);
-
-pub struct MerkleBatch<'a, S: ShaleStore> {
-    m: MutexGuard<'a, MerkleInner<S>>,
 }
 
 impl<S: ShaleStore> Merkle<S> {
@@ -463,11 +468,7 @@ impl<S: ShaleStore> Merkle<S> {
                 .unwrap();
         }
         let header = RefCell::new(header);
-        Self(Mutex::new(MerkleInner { header, store }))
-    }
-
-    pub fn new_batch(&self) -> MerkleBatch<S> {
-        MerkleBatch { m: self.0.lock() }
+        Self { header, store }
     }
 
     fn empty_root() -> &'static Hash {
@@ -484,90 +485,54 @@ impl<S: ShaleStore> Merkle<S> {
     }
 
     pub fn root_hash(&self) -> Hash {
-        let inner = self.0.lock();
-        let root = inner
-            .get_node(inner.header.borrow().root)
+        let root = self
+            .get_node(self.header.borrow().root)
             .unwrap()
             .inner
             .as_branch()
             .unwrap()
             .chd[0];
         if let Some(root) = root {
-            inner.get_node(root).unwrap().root_hash.clone()
+            self.get_node(root).unwrap().root_hash.clone()
         } else {
             Self::empty_root().clone()
         }
     }
 
-    fn dump_(inner: &MerkleInner<S>, u: ObjPtr<Node>, output: &mut String) {
+    fn dump_(&self, u: ObjPtr<Node>, output: &mut String) {
         use std::fmt::Write;
-        let u_ref = inner.get_node(u).unwrap();
+        let u_ref = self.get_node(u).unwrap();
         write!(output, "{} => {}: ", u, hex::encode(&*u_ref.root_hash)).unwrap();
         match &u_ref.inner {
             NodeType::Branch(n) => {
                 writeln!(output, "{:?}", n).unwrap();
                 for c in n.chd.iter() {
                     if let Some(c) = c {
-                        Self::dump_(inner, *c, output)
+                        self.dump_(*c, output)
                     }
                 }
             }
             NodeType::Leaf(n) => writeln!(output, "{:?}", n).unwrap(),
             NodeType::Extension(n) => {
                 writeln!(output, "{:?}", n).unwrap();
-                Self::dump_(inner, n.1, output)
+                self.dump_(n.1, output)
             }
         }
     }
 
     pub fn dump(&self) -> String {
-        let inner = self.0.lock();
-        let root = inner.header.borrow().root;
+        let root = self.header.borrow().root;
         if root.is_null() {
             "<Empty>".to_string()
         } else {
             let mut s = String::new();
-            Self::dump_(&inner, root, &mut s);
+            self.dump_(root, &mut s);
             s
         }
     }
-}
 
-fn to_nibbles<'a>(bytes: &'a [u8]) -> impl Iterator<Item = u8> + 'a {
-    bytes.iter().flat_map(|b| [(b >> 4) & 0xf, b & 0xf].into_iter())
-}
-
-fn from_nibbles<'a>(nibbles: &'a [u8]) -> impl Iterator<Item = u8> + 'a {
-    assert!(nibbles.len() & 1 == 0);
-    nibbles.chunks_exact(2).map(|p| (p[0] << 4) | p[1])
-}
-
-#[test]
-fn test_to_nibbles() {
-    for (bytes, nibbles) in [
-        (vec![0x12, 0x34, 0x56], vec![0x1, 0x2, 0x3, 0x4, 0x5, 0x6]),
-        (vec![0xc0, 0xff], vec![0xc, 0x0, 0xf, 0xf]),
-    ] {
-        let n: Vec<_> = to_nibbles(&bytes).collect();
-        assert_eq!(n, nibbles);
-    }
-}
-
-macro_rules! write_node {
-    ($self: ident, $r: expr, $modify: expr, $parents: expr, $deleted: expr) => {
-        if let None = $r.write($modify) {
-            $self.set_parent($self.new_node($r.clone())?.as_ptr(), $parents);
-            $deleted.push($r.as_ptr());
-            true
-        } else {
-            false
-        }
-    };
-}
-
-impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
     fn new_node(&self, item: Node) -> Result<ObjRef<Node>, MerkleError> {
-        self.m.store.put_item(item, 0).map_err(MerkleError::Shale)
+        self.store.put_item(item, 0).map_err(MerkleError::Shale)
     }
 
     fn set_parent<'b>(&self, new_chd: ObjPtr<Node>, parents: &mut [(ObjRef<'b, Node>, u8)]) {
@@ -579,7 +544,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                     NodeType::Extension(pp) => pp.1 = new_chd,
                     _ => unreachable!(),
                 }
-                p.root_hash = p.inner.hash(&self.m.store);
+                p.root_hash = p.inner.hash(&self.store);
             })
             .unwrap();
     }
@@ -602,12 +567,12 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                             NodeType::Extension(u) => &mut u.0,
                             _ => unreachable!(),
                         }) = PartialPath(n_path[idx + 1..].to_vec());
-                        u.root_hash = u.inner.hash(&self.m.store);
+                        u.root_hash = u.inner.hash(&self.store);
                     })
                     .unwrap();
                 let leaf = self.new_node(Node::new(
                     NodeType::Leaf(LeafNode(PartialPath(rem_path[idx + 1..].to_vec()), Data(val))),
-                    &self.m.store,
+                    &self.store,
                 ))?;
                 let mut chd = [None; NBRANCH];
                 chd[rem_path[idx] as usize] = Some(leaf.as_ptr());
@@ -624,12 +589,12 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                 });
                 let branch = self.new_node(Node::new(
                     NodeType::Branch(BranchNode { chd, value: None }),
-                    &self.m.store,
+                    &self.store,
                 ))?;
                 if idx > 0 {
                     self.new_node(Node::new(
                         NodeType::Extension(ExtNode(PartialPath(rem_path[..idx].to_vec()), branch.as_ptr())),
-                        &self.m.store,
+                        &self.store,
                     ))?
                 } else {
                     branch
@@ -642,7 +607,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                             match &mut u.inner {
                                 NodeType::Leaf(u) => u.1 = Data(val),
                                 NodeType::Extension(u) => {
-                                    let mut b_ref = self.m.get_node(u.1).unwrap();
+                                    let mut b_ref = self.get_node(u.1).unwrap();
                                     if let None =
                                         b_ref.write(|b| b.inner.as_branch_mut().unwrap().value = Some(Data(val)))
                                     {
@@ -652,7 +617,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                                 }
                                 _ => unreachable!(),
                             }
-                            u.root_hash = u.inner.hash(&self.m.store);
+                            u.root_hash = u.inner.hash(&self.store);
                         })
                         .unwrap();
                     return Ok(None)
@@ -666,7 +631,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                                 NodeType::Extension(u) => &mut u.0,
                                 _ => unreachable!(),
                             }) = PartialPath(n_path[rem_path.len() + 1..].to_vec());
-                            u.root_hash = u.inner.hash(&self.m.store);
+                            u.root_hash = u.inner.hash(&self.store);
                         })
                         .unwrap();
                     (
@@ -693,7 +658,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                     }
                     let leaf = self.new_node(Node::new(
                         NodeType::Leaf(LeafNode(PartialPath(rem_path[n_path.len() + 1..].to_vec()), Data(val))),
-                        &self.m.store,
+                        &self.store,
                     ))?;
                     deleted.push(u_ptr);
                     (leaf.as_ptr(), &n_path[..], rem_path[n_path.len()], n_value)
@@ -701,11 +666,11 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                 // [parent] (-> [ExtNode]) -> [branch with v] -> [Leaf]
                 let mut chd = [None; NBRANCH];
                 chd[idx as usize] = Some(leaf_ptr);
-                let branch = self.new_node(Node::new(NodeType::Branch(BranchNode { chd, value: v }), &self.m.store))?;
+                let branch = self.new_node(Node::new(NodeType::Branch(BranchNode { chd, value: v }), &self.store))?;
                 if prefix.len() > 0 {
                     self.new_node(Node::new(
                         NodeType::Extension(ExtNode(PartialPath(prefix.to_vec()), branch.as_ptr())),
-                        &self.m.store,
+                        &self.store,
                     ))?
                 } else {
                     branch
@@ -723,10 +688,10 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
     pub fn insert<K: AsRef<[u8]>>(&mut self, key: K, val: Vec<u8>) -> Result<(), MerkleError> {
         let mut deleted = Vec::new();
         let mut updated = Vec::new();
-        let root = self.m.header.borrow().root;
+        let root = self.header.borrow().root;
         let mut chunks = vec![0];
         chunks.extend(to_nibbles(key.as_ref()));
-        let mut u_ref = self.m.get_node(root)?;
+        let mut u_ref = self.get_node(root)?;
         let mut parents = Vec::new();
         let mut nskip = 0;
         let mut val = Some(val);
@@ -745,7 +710,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                                 PartialPath(chunks[i + 1..].to_vec()),
                                 Data(val.take().unwrap()),
                             )),
-                            &self.m.store,
+                            &self.store,
                         ))?;
                         write_node!(
                             self,
@@ -753,7 +718,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                             |u| {
                                 let uu = u.inner.as_branch_mut().unwrap();
                                 uu.chd[*nib as usize] = Some(leaf.as_ptr());
-                                u.root_hash = u.inner.hash(&self.m.store);
+                                u.root_hash = u.inner.hash(&self.store);
                             },
                             &mut parents,
                             &mut deleted
@@ -798,7 +763,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
 
             updated.push(u_ref.as_ptr());
             parents.push((u_ref, *nib));
-            u_ref = self.m.get_node(next_ptr)?;
+            u_ref = self.get_node(next_ptr)?;
         }
         if val.is_some() {
             let u_ptr = u_ref.as_ptr();
@@ -837,13 +802,13 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                                     chd,
                                     value: Some(Data(val.take().unwrap())),
                                 }),
-                                &self.m.store,
+                                &self.store,
                             ))
                             .unwrap()
                             .as_ptr();
                         self.set_parent(branch, &mut parents);
                     }
-                    u.root_hash = u.inner.hash(&self.m.store);
+                    u.root_hash = u.inner.hash(&self.store);
                 },
                 &mut parents,
                 &mut deleted
@@ -851,17 +816,16 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
         }
 
         for ptr in updated.into_iter() {
-            self.m
-                .get_node(ptr)
+            self.get_node(ptr)
                 .unwrap()
-                .write(|u| u.root_hash = u.inner.hash(&self.m.store))
+                .write(|u| u.root_hash = u.inner.hash(&self.store))
                 .unwrap();
         }
 
         drop(u_ref);
         drop(parents);
         for ptr in deleted.into_iter() {
-            self.m.store.free_item(ptr).map_err(MerkleError::Shale)?;
+            self.store.free_item(ptr).map_err(MerkleError::Shale)?;
         }
         Ok(())
     }
@@ -891,7 +855,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                     let leaf = self
                         .new_node(Node::new(
                             NodeType::Leaf(LeafNode(PartialPath(Vec::new()), val)),
-                            &self.m.store,
+                            &self.store,
                         ))
                         .unwrap()
                         .as_ptr();
@@ -900,7 +864,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                         p_ref,
                         |p| {
                             p.inner.as_branch_mut().unwrap().chd[p_idx as usize] = Some(leaf);
-                            p.root_hash = p.inner.hash(&self.m.store)
+                            p.root_hash = p.inner.hash(&self.store)
                         },
                         parents,
                         deleted
@@ -912,7 +876,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                     let leaf = self
                         .new_node(Node::new(
                             NodeType::Leaf(LeafNode(PartialPath(n.0.clone().into_inner()), val)),
-                            &self.m.store,
+                            &self.store,
                         ))
                         .unwrap()
                         .as_ptr();
@@ -923,7 +887,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
             }
         } else {
             let (c_ptr, idx) = b_chd.unwrap();
-            let mut c_ref = self.m.get_node(c_ptr).unwrap();
+            let mut c_ref = self.get_node(c_ptr).unwrap();
             match &c_ref.inner {
                 NodeType::Branch(_) => {
                     match &p_ref.inner {
@@ -936,7 +900,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                             let ext = self
                                 .new_node(Node::new(
                                     NodeType::Extension(ExtNode(PartialPath(vec![idx]), c_ptr)),
-                                    &self.m.store,
+                                    &self.store,
                                 ))?
                                 .as_ptr();
                             self.set_parent(ext, &mut [(p_ref, p_idx)]);
@@ -954,7 +918,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                                     let mut pp = p.inner.as_extension_mut().unwrap();
                                     pp.0 .0.push(idx);
                                     pp.1 = c_ptr;
-                                    p.root_hash = p.inner.hash(&self.m.store);
+                                    p.root_hash = p.inner.hash(&self.store);
                                 },
                                 parents,
                                 deleted
@@ -979,7 +943,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                                 })
                                 .0
                                 .insert(0, idx);
-                                c.root_hash = c.inner.hash(&self.m.store)
+                                c.root_hash = c.inner.hash(&self.store)
                             }) {
                                 deleted.push(c_ptr);
                                 self.new_node(c_ref.clone())?.as_ptr()
@@ -991,7 +955,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                                 p_ref,
                                 |p| {
                                     p.inner.as_branch_mut().unwrap().chd[p_idx as usize] = Some(c_ptr);
-                                    p.root_hash = p.inner.hash(&self.m.store)
+                                    p.root_hash = p.inner.hash(&self.store)
                                 },
                                 parents,
                                 deleted
@@ -1017,7 +981,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                                     };
                                     path.extend(&**path0);
                                     *path0 = PartialPath(path);
-                                    c.root_hash = c.inner.hash(&self.m.store)
+                                    c.root_hash = c.inner.hash(&self.store)
                                 },
                                 parents,
                                 deleted
@@ -1039,7 +1003,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
     ) -> Result<(), MerkleError> {
         // [b] -> [u] -> [c]
         let (mut b_ref, b_idx) = parents.pop().unwrap();
-        let mut c_ref = self.m.get_node(c_ptr).unwrap();
+        let mut c_ref = self.get_node(c_ptr).unwrap();
         match &c_ref.inner {
             NodeType::Branch(_) => {
                 write_node!(
@@ -1053,7 +1017,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                                 n.chd[b_idx as usize] = Some(
                                     self.new_node(Node::new(
                                         NodeType::Extension(ExtNode(PartialPath(vec![idx]), c_ptr)),
-                                        &self.m.store,
+                                        &self.store,
                                     ))
                                     .unwrap()
                                     .as_ptr(),
@@ -1067,7 +1031,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                             }
                             _ => unreachable!(),
                         }
-                        b.root_hash = b.inner.hash(&self.m.store)
+                        b.root_hash = b.inner.hash(&self.store)
                     },
                     parents,
                     deleted
@@ -1085,7 +1049,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                         }
                         .0
                         .insert(0, idx);
-                        c.root_hash = c.inner.hash(&self.m.store)
+                        c.root_hash = c.inner.hash(&self.store)
                     }) {
                         deleted.push(c_ptr);
                         self.new_node(c_ref.clone())?.as_ptr()
@@ -1113,7 +1077,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                         };
                         path.extend(&**path0);
                         *path0 = PartialPath(path);
-                        c.root_hash = c.inner.hash(&self.m.store)
+                        c.root_hash = c.inner.hash(&self.store)
                     }) {
                         deleted.push(c_ptr);
                         self.new_node(c_ref.clone())?.as_ptr()
@@ -1129,7 +1093,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
     }
 
     pub fn remove<K: AsRef<[u8]>>(&mut self, key: K) -> Result<bool, MerkleError> {
-        let root = self.m.header.borrow().root;
+        let root = self.header.borrow().root;
         let mut chunks = vec![0];
         chunks.extend(to_nibbles(key.as_ref()));
 
@@ -1140,7 +1104,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
         let mut deleted = Vec::new();
         let mut updated = Vec::new();
         let mut parents: Vec<(ObjRef<Node>, _)> = Vec::new();
-        let mut u_ref = self.m.get_node(root)?;
+        let mut u_ref = self.get_node(root)?;
         let mut nskip = 0;
         let mut found = false;
 
@@ -1176,7 +1140,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
 
             updated.push(u_ref.as_ptr());
             parents.push((u_ref, *nib));
-            u_ref = self.m.get_node(next_ptr)?;
+            u_ref = self.get_node(next_ptr)?;
         }
         if !found {
             match &u_ref.inner {
@@ -1188,7 +1152,7 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
                     u_ref
                         .write(|u| {
                             u.inner.as_branch_mut().unwrap().value = None;
-                            u.root_hash = u.inner.hash(&self.m.store)
+                            u.root_hash = u.inner.hash(&self.store)
                         })
                         .unwrap();
                     found = true;
@@ -1210,18 +1174,37 @@ impl<'a, S: ShaleStore> MerkleBatch<'a, S> {
         }
 
         for ptr in updated.into_iter() {
-            self.m
-                .get_node(ptr)
+            self.get_node(ptr)
                 .unwrap()
-                .write(|u| u.root_hash = u.inner.hash(&self.m.store))
+                .write(|u| u.root_hash = u.inner.hash(&self.store))
                 .unwrap();
         }
 
         drop(u_ref);
         drop(parents);
         for ptr in deleted.into_iter() {
-            self.m.store.free_item(ptr).map_err(MerkleError::Shale)?;
+            self.store.free_item(ptr).map_err(MerkleError::Shale)?;
         }
         Ok(found)
+    }
+}
+
+fn to_nibbles<'a>(bytes: &'a [u8]) -> impl Iterator<Item = u8> + 'a {
+    bytes.iter().flat_map(|b| [(b >> 4) & 0xf, b & 0xf].into_iter())
+}
+
+fn from_nibbles<'a>(nibbles: &'a [u8]) -> impl Iterator<Item = u8> + 'a {
+    assert!(nibbles.len() & 1 == 0);
+    nibbles.chunks_exact(2).map(|p| (p[0] << 4) | p[1])
+}
+
+#[test]
+fn test_to_nibbles() {
+    for (bytes, nibbles) in [
+        (vec![0x12, 0x34, 0x56], vec![0x1, 0x2, 0x3, 0x4, 0x5, 0x6]),
+        (vec![0xc0, 0xff], vec![0xc, 0x0, 0xf, 0xf]),
+    ] {
+        let n: Vec<_> = to_nibbles(&bytes).collect();
+        assert_eq!(n, nibbles);
     }
 }
