@@ -1,7 +1,7 @@
 use firewood::file;
 use firewood::merkle::*;
 use firewood::storage::*;
-use shale::{MemStore, MummyItem, ObjPtr, WriteContext};
+use shale::{MemStore, MummyItem, ObjPtr};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -70,8 +70,7 @@ fn test_persistent_merkle_simple() {
 
     let space =
         shale::compact::CompactSpace::new(mem_meta.clone(), mem_payload.clone(), compact_header, 10, 16).unwrap();
-    let wctx = WriteContext::new();
-    let merkle = Merkle::new(merkle_header, space, &wctx);
+    let merkle = Merkle::new(merkle_header, space);
     let items = vec![
         ("do", "verb"),
         ("doe", "reindeer"),
@@ -80,11 +79,12 @@ fn test_persistent_merkle_simple() {
         ("horse", "stallion"),
         ("ddd", "ok"),
     ];
-    let mut wb = merkle.new_batch();
-    for (k, v) in items.iter() {
-        wb.insert(k, v.as_bytes().to_vec()).unwrap();
+    {
+        let mut wb = merkle.new_batch();
+        for (k, v) in items.iter() {
+            wb.insert(k, v.as_bytes().to_vec()).unwrap();
+        }
     }
-    wb.commit();
     disk_requester.write(vec![
         BufferWrite {
             space_id: mem_payload.id(),
@@ -97,7 +97,7 @@ fn test_persistent_merkle_simple() {
     ]);
 
     disk_requester.shutdown();
-    disk_thread.join();
+    disk_thread.join().unwrap();
 
     println!("{}", merkle.dump());
 }

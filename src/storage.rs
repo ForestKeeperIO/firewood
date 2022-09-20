@@ -236,8 +236,8 @@ impl<S: Clone + MemStore> std::ops::Deref for StoreRef<S> {
 }
 
 impl<S: Clone + MemStore + 'static> MemView for StoreRef<S> {
-    fn mem_image(&self) -> Box<dyn MemStore> {
-        Box::new(self.store.clone())
+    fn mem_image(&self) -> &dyn MemStore {
+        &self.store
     }
 }
 

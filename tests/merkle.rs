@@ -1,6 +1,6 @@
 use std::rc::Rc;
 use firewood::merkle::*;
-use shale::{MemStore, MummyItem, ObjPtr, WriteContext};
+use shale::{MemStore, MummyItem, ObjPtr};
 
 fn merkle_setup_test(meta_size: u64, compact_size: u64) -> Merkle<shale::compact::CompactSpace> {
     use shale::{compact::CompactSpaceHeader, PlainMem};
@@ -30,19 +30,19 @@ fn merkle_setup_test(meta_size: u64, compact_size: u64) -> Merkle<shale::compact
     };
 
     let space = shale::compact::CompactSpace::new(mem_meta, mem_payload, compact_header, 10, 16).unwrap();
-    let wctx = WriteContext::new();
-    Merkle::new(merkle_header, space, &wctx)
+    Merkle::new(merkle_header, space)
 }
 
 fn merkle_build_test<K: AsRef<[u8]> + std::cmp::Ord + Clone, V: AsRef<[u8]> + Clone>(
     items: Vec<(K, V)>, meta_size: u64, compact_size: u64,
-) -> (Merkle<shale::compact::CompactSpace>, Vec<shale::DiskWrite>) {
+) -> Merkle<shale::compact::CompactSpace> {
     let merkle = merkle_setup_test(meta_size, compact_size);
-    let mut batch = merkle.new_batch();
-    for (k, v) in items.iter() {
-        batch.insert(k, v.as_ref().to_vec()).unwrap();
+    {
+        let mut batch = merkle.new_batch();
+        for (k, v) in items.iter() {
+            batch.insert(k, v.as_ref().to_vec()).unwrap();
+        }
     }
-    let writes = batch.commit();
     let merkle_root = &*merkle.root_hash();
     let items_copy = items.clone();
     let reference_root = triehash::trie_root::<keccak_hasher::KeccakHasher, _, _, _>(items);
@@ -58,7 +58,7 @@ fn merkle_build_test<K: AsRef<[u8]> + std::cmp::Ord + Clone, V: AsRef<[u8]> + Cl
         merkle.dump();
         panic!();
     }
-    (merkle, writes)
+    merkle
 }
 
 #[test]
@@ -71,10 +71,7 @@ fn test_root_hash_simple_insertions() {
         ("horse", "stallion"),
         ("ddd", "ok"),
     ];
-    let (merkle, writes) = merkle_build_test(items, 0x10000, 0x10000);
-    for w in writes {
-        println!("{:?}", w);
-    }
+    let merkle = merkle_build_test(items, 0x10000, 0x10000);
     merkle.dump();
 }
 
@@ -135,18 +132,20 @@ fn test_root_hash_reversed_deletions() {
         let mut dumps = Vec::new();
         for (k, v) in items.iter() {
             dumps.push(merkle.dump());
-            let mut wb = merkle.new_batch();
-            wb.insert(k, v.to_vec()).unwrap();
-            wb.commit();
+            {
+                let mut wb = merkle.new_batch();
+                wb.insert(k, v.to_vec()).unwrap();
+            }
             hashes.push(merkle.root_hash());
         }
         hashes.pop();
         println!("----");
         let mut prev_dump = merkle.dump();
         for (((k, _), h), d) in items.iter().rev().zip(hashes.iter().rev()).zip(dumps.iter().rev()) {
-            let mut wb = merkle.new_batch();
-            wb.remove(k).unwrap();
-            wb.commit();
+            {
+                let mut wb = merkle.new_batch();
+                wb.remove(k).unwrap();
+            }
             let h0 = merkle.root_hash();
             if *h != h0 {
                 for (k, _) in items.iter() {
@@ -197,12 +196,12 @@ fn test_root_hash_random_deletions() {
         for (k, v) in items.iter() {
             let mut wb = merkle.new_batch();
             wb.insert(k, v.to_vec()).unwrap();
-            wb.commit();
         }
         for (k, _) in items_ordered.into_iter() {
-            let mut wb = merkle.new_batch();
-            wb.remove(&k).unwrap();
-            wb.commit();
+            {
+                let mut wb = merkle.new_batch();
+                wb.remove(&k).unwrap();
+            }
             items.remove(&k);
             let h = triehash::trie_root::<keccak_hasher::KeccakHasher, Vec<_>, _, _>(items.iter().collect());
             let h0 = merkle.root_hash();
