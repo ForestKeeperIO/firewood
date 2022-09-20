@@ -1,3 +1,4 @@
+use std::rc::Rc;
 use firewood::merkle::*;
 use shale::{MemStore, MummyItem, ObjPtr, WriteContext};
 
@@ -6,8 +7,8 @@ fn merkle_setup_test(meta_size: u64, compact_size: u64) -> Merkle<shale::compact
     const RESERVED: u64 = 0x1000;
     assert!(meta_size > RESERVED);
     assert!(compact_size > RESERVED);
-    let mem_meta = Box::new(PlainMem::new(meta_size, 0x0)) as Box<dyn MemStore>;
-    let mem_payload = Box::new(PlainMem::new(compact_size, 0x1));
+    let mem_meta = Rc::new(PlainMem::new(meta_size, 0x0)) as Rc<dyn MemStore>;
+    let mem_payload = Rc::new(PlainMem::new(compact_size, 0x1));
     let compact_header: ObjPtr<CompactSpaceHeader> = unsafe { ObjPtr::new_from_addr(0x0) };
     let merkle_header: ObjPtr<MerkleHeader> = unsafe { ObjPtr::new_from_addr(CompactSpaceHeader::MSIZE) };
 
@@ -18,12 +19,12 @@ fn merkle_setup_test(meta_size: u64, compact_size: u64) -> Merkle<shale::compact
     mem_meta.write(merkle_header.addr(), &MerkleHeader::new_empty().dehydrate());
 
     let compact_header = unsafe {
-        shale::get_obj_ref(&mem_meta, compact_header, shale::compact::CompactHeader::MSIZE)
+        shale::get_obj_ref(mem_meta.as_ref(), compact_header, shale::compact::CompactHeader::MSIZE)
             .unwrap()
             .to_longlive()
     };
     let merkle_header = unsafe {
-        shale::get_obj_ref(&mem_meta, merkle_header, MerkleHeader::MSIZE)
+        shale::get_obj_ref(mem_meta.as_ref(), merkle_header, MerkleHeader::MSIZE)
             .unwrap()
             .to_longlive()
     };

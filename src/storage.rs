@@ -136,6 +136,10 @@ impl StoreDelta {
         }
         Some(Self(deltas))
     }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
 }
 
 struct StoreRev {
@@ -281,6 +285,14 @@ impl StoreRevMut {
             deltas.insert(pid, page);
         }
         RefMut::map(deltas, |e| &mut e.get_mut(&pid).unwrap()[..])
+    }
+
+    pub fn to_delta(&self) -> StoreDelta {
+        let mut pages = Vec::new();
+        for (pid, page) in self.deltas.borrow().iter() {
+            pages.push(DeltaPage(*pid, **page));
+        }
+        StoreDelta(pages)
     }
 }
 
@@ -572,16 +584,18 @@ impl FilePool {
     fn new(cfg: &StoreConfig) -> Result<Self, StoreError> {
         let rootfd = cfg.rootfd;
         let file_nbit = cfg.file_nbit;
-        if let Err(_) = flock(rootfd, FlockArg::LockExclusiveNonblock) {
-            return Err(StoreError::InitError("the store is busy".into()))
-        }
-        Ok(Self {
+        let s = Self {
             files: RefCell::new(lru::LruCache::new(
                 NonZeroUsize::new(cfg.ncached_files).expect("non-zero file num"),
             )),
             file_nbit,
             rootfd,
-        })
+        };
+        let f0 = s.get_file(0)?;
+        if let Err(_) = flock(f0.get_fd(), FlockArg::LockExclusiveNonblock) {
+            return Err(StoreError::InitError("the store is busy".into()))
+        }
+        Ok(s)
     }
 
     fn get_file(&self, fid: u64) -> Result<Rc<File>, StoreError> {
@@ -606,7 +620,8 @@ impl FilePool {
 
 impl Drop for FilePool {
     fn drop(&mut self) {
-        flock(self.rootfd, FlockArg::UnlockNonblock).ok();
+        let f0 = self.get_file(0).unwrap();
+        flock(f0.get_fd(), FlockArg::UnlockNonblock).ok();
         nix::unistd::close(self.rootfd).ok();
     }
 }
@@ -766,6 +781,7 @@ impl DiskBuffer {
 
     #[tokio::main(flavor = "current_thread")]
     pub async fn run(mut self) {
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
         self.local_pool
             .clone()
             .run_until(async {
@@ -788,6 +804,8 @@ impl DiskBuffer {
     }
 }
 
+unsafe impl Send for DiskBuffer {}
+
 #[derive(Clone)]
 pub struct DiskBufferRequester {
     sender: mpsc::Sender<BufferCmd>,
@@ -796,7 +814,7 @@ pub struct DiskBufferRequester {
 impl Default for DiskBufferRequester {
     fn default() -> Self {
         Self {
-            sender: mpsc::channel(0).0,
+            sender: mpsc::channel(1).0,
         }
     }
 }
