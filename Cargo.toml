@@ -15,11 +15,10 @@ libaio-futures = "0.2.2"
 nix = "0.25.0"
 typed-builder = "0.10.0"
 tokio = { version = "1.21.1", features = ["rt", "sync", "macros"] }
+shale = "0.1.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-[dependencies.shale]
-path = "./shale"
 
 [dev-dependencies]
 keccak-hasher = "0.15.3"
