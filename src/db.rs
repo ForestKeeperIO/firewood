@@ -7,7 +7,7 @@ use shale::{MemStore, MummyItem, ObjPtr, SpaceID};
 use typed_builder::TypedBuilder;
 
 use crate::file;
-use crate::merkle::{Merkle, MerkleHeader};
+use crate::merkle::{Merkle, MerkleHeader, Hash};
 use crate::storage::{CachedSpace, DiskBuffer, DiskBufferConfig, MemStoreR, StoreConfig, StoreRevMut};
 
 const MERKLE_META_SPACE: SpaceID = 0x0;
@@ -17,10 +17,19 @@ const SPACE_RESERVED: u64 = 0x1000;
 #[derive(Debug)]
 pub enum DBError {
     Merkle(crate::merkle::MerkleError),
+    System(nix::Error),
+}
+
+#[repr(C)]
+struct DBHeader {
+    magic: [u8; 16],
+    meta_file_nbit: u64,
+    compact_file_nbit: u64,
+    compact_regn_nbit: u64,
 }
 
 #[derive(TypedBuilder)]
-pub struct MerkleDBConfig {
+pub struct DBConfig {
     meta_ncached_pages: usize,
     meta_ncached_files: usize,
     #[builder(default = 22)] // 4MB file by default
@@ -37,7 +46,7 @@ pub struct MerkleDBConfig {
     truncate: bool,
 }
 
-struct MerkleDBInner {
+struct DBInner {
     merkle: Merkle<shale::compact::CompactSpace>,
     disk_requester: crate::storage::DiskBufferRequester,
     disk_thread: Option<JoinHandle<()>>,
@@ -45,21 +54,52 @@ struct MerkleDBInner {
     mem_payload: Rc<StoreRevMut>,
 }
 
-impl Drop for MerkleDBInner {
+impl Drop for DBInner {
     fn drop(&mut self) {
         self.disk_requester.shutdown();
         self.disk_thread.take().map(JoinHandle::join);
     }
 }
 
-pub struct MerkleDB(Mutex<MerkleDBInner>);
+pub struct DB(Mutex<DBInner>);
 
-impl MerkleDB {
-    pub fn new(db_path: &str, cfg: &MerkleDBConfig) -> Self {
+impl DB {
+    pub fn new(db_path: &str, cfg: &DBConfig) -> Result<Self, DBError> {
         use shale::compact::CompactSpaceHeader;
-        let (fd0, reset) = file::open_dir(db_path, cfg.truncate).unwrap();
-        let freed_fd = file::touch_dir("freed", fd0).unwrap();
-        let compact_fd = file::touch_dir("compact", fd0).unwrap();
+        if cfg.truncate {
+            let _ = std::fs::remove_dir_all(db_path);
+        }
+        let (fd0, reset) = file::open_dir(db_path, cfg.truncate).map_err(DBError::System)?;
+        let meta_fd = file::touch_dir("meta", fd0).map_err(DBError::System)?;
+        let compact_fd = file::touch_dir("compact", fd0).map_err(DBError::System)?;
+
+        let file0 = crate::file::File::new(0, SPACE_RESERVED, meta_fd).map_err(DBError::System)?;
+        let fd0 = file0.get_fd();
+
+        if reset {
+            // FIXME: return as an error
+            assert!(cfg.compact_file_nbit >= cfg.compact_regn_nbit);
+            assert!(cfg.compact_regn_nbit >= crate::storage::PAGE_SIZE_NBIT);
+            nix::unistd::ftruncate(fd0, 0).map_err(DBError::System)?;
+            nix::unistd::ftruncate(fd0, 1 << cfg.meta_file_nbit).map_err(DBError::System)?;
+            let magic_str = b"firewood v0.1";
+            let mut magic = [0; 16];
+            magic[..magic_str.len()].copy_from_slice(magic_str);
+            let header = DBHeader {
+                magic: magic,
+                meta_file_nbit: cfg.meta_file_nbit,
+                compact_file_nbit: cfg.compact_file_nbit,
+                compact_regn_nbit: cfg.compact_regn_nbit,
+            };
+            nix::sys::uio::pwrite(fd0, &shale::util::get_raw_bytes(&header), 0).map_err(DBError::System)?;
+        }
+
+        // read DBHeader
+        let mut header_bytes = [0; std::mem::size_of::<DBHeader>()];
+        nix::sys::uio::pread(fd0, &mut header_bytes, 0).map_err(DBError::System)?;
+        drop(file0);
+        let mut offset = header_bytes.len() as u64;
+        let header = unsafe { std::mem::transmute::<_, DBHeader>(header_bytes) };
 
         let mem_meta = Arc::new(
             CachedSpace::new(
@@ -67,8 +107,8 @@ impl MerkleDB {
                     .ncached_pages(cfg.meta_ncached_pages)
                     .ncached_files(cfg.meta_ncached_files)
                     .space_id(MERKLE_META_SPACE)
-                    .file_nbit(cfg.meta_file_nbit)
-                    .rootfd(freed_fd)
+                    .file_nbit(header.meta_file_nbit)
+                    .rootfd(meta_fd)
                     .build(),
             )
             .unwrap(),
@@ -79,7 +119,7 @@ impl MerkleDB {
                     .ncached_pages(cfg.compact_ncached_pages)
                     .ncached_files(cfg.compact_ncached_files)
                     .space_id(MERKLE_COMPACT_SPACE)
-                    .file_nbit(cfg.compact_file_nbit)
+                    .file_nbit(header.compact_file_nbit)
                     .rootfd(compact_fd)
                     .build(),
             )
@@ -96,12 +136,20 @@ impl MerkleDB {
         let mem_payload = Rc::new(StoreRevMut::new(mem_payload as Arc<dyn MemStoreR>));
 
         // set up the storage layout
-
-        let compact_header: ObjPtr<CompactSpaceHeader> = unsafe { ObjPtr::new_from_addr(0x0) };
-        let merkle_header: ObjPtr<MerkleHeader> = unsafe { ObjPtr::new_from_addr(CompactSpaceHeader::MSIZE) };
+        let compact_header: ObjPtr<CompactSpaceHeader>;
+        let merkle_header: ObjPtr<MerkleHeader>;
+        unsafe {
+            // CompactHeader starts after DBHeader in meta space
+            compact_header = ObjPtr::new_from_addr(offset);
+            offset += CompactSpaceHeader::MSIZE;
+            // MerkleHeader starts after CompactHeader in meta space
+            merkle_header = ObjPtr::new_from_addr(offset);
+            offset += MerkleHeader::MSIZE;
+            assert!(offset <= SPACE_RESERVED);
+        }
 
         if reset {
-            // initialize the DB
+            // initialize headers
             mem_meta.write(
                 compact_header.addr(),
                 &shale::compact::CompactSpaceHeader::new(SPACE_RESERVED, SPACE_RESERVED).dehydrate(),
@@ -110,44 +158,50 @@ impl MerkleDB {
         }
 
         let mem_meta_ref = mem_meta.as_ref() as &dyn MemStore;
-        let compact_header = unsafe {
-            shale::get_obj_ref(mem_meta_ref, compact_header, shale::compact::CompactHeader::MSIZE)
+        let ch_ref;
+        let mh_ref;
+        unsafe {
+            ch_ref = shale::get_obj_ref(mem_meta_ref, compact_header, shale::compact::CompactHeader::MSIZE)
                 .unwrap()
-                .to_longlive()
-        };
-        let merkle_header = unsafe {
-            shale::get_obj_ref(mem_meta_ref, merkle_header, MerkleHeader::MSIZE)
+                .to_longlive();
+            mh_ref = shale::get_obj_ref(mem_meta_ref, merkle_header, MerkleHeader::MSIZE)
                 .unwrap()
-                .to_longlive()
-        };
+                .to_longlive();
+        }
 
         let space = shale::compact::CompactSpace::new(
             mem_meta.clone(),
             mem_payload.clone(),
-            compact_header,
+            ch_ref,
             cfg.compact_max_walk,
-            cfg.compact_regn_nbit,
+            header.compact_regn_nbit,
         )
         .unwrap();
-        let merkle = Merkle::new(merkle_header, space);
-        Self(Mutex::new(MerkleDBInner {
+        let merkle = Merkle::new(mh_ref, space);
+        Ok(Self(Mutex::new(DBInner {
             merkle,
             disk_thread,
             disk_requester,
             mem_meta,
             mem_payload,
-        }))
+        })))
     }
 
     pub fn new_writebatch(&self) -> WriteBatch {
-        WriteBatch {
-            m: self.0.lock(),
-        }
+        WriteBatch { m: self.0.lock() }
+    }
+
+    pub fn root_hash(&self) -> Hash {
+        self.0.lock().merkle.root_hash()
+    }
+
+    pub fn dump(&self) -> String {
+        self.0.lock().merkle.dump()
     }
 }
 
 pub struct WriteBatch<'a> {
-    m: MutexGuard<'a, MerkleDBInner>,
+    m: MutexGuard<'a, DBInner>,
 }
 
 impl<'a> WriteBatch<'a> {
@@ -174,4 +228,3 @@ impl<'a> WriteBatch<'a> {
         ]);
     }
 }
-

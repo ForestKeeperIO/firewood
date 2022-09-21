@@ -13,9 +13,9 @@ use typed_builder::TypedBuilder;
 
 use crate::file::{Fd, File};
 
-const PAGE_SIZE_NBIT: u64 = 12;
-const PAGE_SIZE: u64 = 1 << PAGE_SIZE_NBIT;
-const PAGE_MASK: u64 = PAGE_SIZE - 1;
+pub(crate) const PAGE_SIZE_NBIT: u64 = 12;
+pub(crate) const PAGE_SIZE: u64 = 1 << PAGE_SIZE_NBIT;
+pub(crate) const PAGE_MASK: u64 = PAGE_SIZE - 1;
 
 pub trait MemStoreR {
     fn get_slice(&self, offset: u64, length: u64) -> Option<Vec<u8>>;
@@ -461,9 +461,10 @@ impl CachedSpaceInner {
         }
         let file_nbit = self.files.get_file_nbit();
         let file_size = 1 << file_nbit;
-        let file = self.files.get_file((pid << PAGE_SIZE_NBIT) >> file_nbit)?;
+        let poff = pid << PAGE_SIZE_NBIT;
+        let file = self.files.get_file(poff >> file_nbit)?;
         let mut page: Page = [0; PAGE_SIZE as usize];
-        nix::sys::uio::pread(file.get_fd(), &mut page, (pid & (1 - file_size)) as nix::libc::off_t)
+        nix::sys::uio::pread(file.get_fd(), &mut page, (poff & (file_size - 1)) as nix::libc::off_t)
             .map_err(StoreError::System)?;
         Ok(Box::new(page))
     }
@@ -606,7 +607,7 @@ impl FilePool {
             None => {
                 files.put(
                     fid,
-                    Rc::new(File::new(fid, file_size, self.rootfd, false).map_err(StoreError::System)?),
+                    Rc::new(File::new(fid, file_size, self.rootfd).map_err(StoreError::System)?),
                 );
                 files.peek(&fid).unwrap().clone()
             }

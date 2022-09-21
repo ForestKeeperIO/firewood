@@ -38,9 +38,9 @@ impl File {
         format!("{:08x}.fw", fid)
     }
 
-    pub fn new(fid: u64, flen: u64, rootfd: Fd, truncate: bool) -> nix::Result<Self> {
+    pub fn new(fid: u64, flen: u64, rootfd: Fd) -> nix::Result<Self> {
         let fname = Self::_get_fname(fid);
-        let fd = match Self::open_file(rootfd, &fname, truncate) {
+        let fd = match Self::open_file(rootfd, &fname, false) {
             Ok(fd) => fd,
             Err(e) => match e {
                 Errno::ENOENT => {
@@ -91,15 +91,15 @@ pub fn touch_dir(dirname: &str, rootfd: Fd) -> Result<Fd, Errno> {
     )?)
 }
 
-pub fn open_dir(path: &str, truncate: bool) -> Result<(Fd, bool), ()> {
+pub fn open_dir(path: &str, truncate: bool) -> Result<(Fd, bool), nix::Error> {
     let mut reset_header = truncate;
     if truncate {
         let _ = std::fs::remove_dir_all(path);
     }
     match mkdir(path, Mode::S_IRUSR | Mode::S_IWUSR | Mode::S_IXUSR) {
-        Err(_) => {
+        Err(e) => {
             if truncate {
-                return Err(())
+                return Err(e)
             }
         }
         Ok(_) => {
@@ -110,7 +110,7 @@ pub fn open_dir(path: &str, truncate: bool) -> Result<(Fd, bool), ()> {
     Ok((
         match open(path, OFlag::O_DIRECTORY | OFlag::O_PATH, Mode::empty()) {
             Ok(fd) => fd,
-            Err(_) => return Err(()),
+            Err(e) => return Err(e),
         },
         reset_header,
     ))
