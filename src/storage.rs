@@ -30,7 +30,7 @@ pub struct SpaceWrite {
 }
 
 /// Basic copy-on-write item in the linear storage space for multi-versioning.
-pub struct DeltaPage(u64, Page);
+pub struct DeltaPage(u64, Box<Page>);
 
 impl DeltaPage {
     #[inline(always)]
@@ -40,12 +40,12 @@ impl DeltaPage {
 
     #[inline(always)]
     fn data(&self) -> &[u8] {
-        &self.1
+        self.1.as_ref()
     }
 
     #[inline(always)]
     fn data_mut(&mut self) -> &mut [u8] {
-        &mut self.1
+        self.1.as_mut()
     }
 }
 
@@ -88,7 +88,7 @@ impl StoreDelta {
                     let off = p << PAGE_SIZE_NBIT;
                     deltas.push(DeltaPage(
                         p,
-                        src.get_slice(off, PAGE_SIZE).unwrap().try_into().unwrap(),
+                        Box::new(src.get_slice(off, PAGE_SIZE).unwrap().try_into().unwrap()),
                     ));
                 }
             };
@@ -143,7 +143,7 @@ impl StoreDelta {
 }
 
 struct StoreRev {
-    prev: Arc<dyn MemStoreR>,
+    prev: Rc<dyn MemStoreR>,
     deltas: StoreDelta,
 }
 
@@ -214,12 +214,12 @@ impl MemStoreR for StoreRev {
 }
 
 #[derive(Clone, Debug)]
-pub struct StoreRevShared(Arc<StoreRev>);
+pub struct StoreRevShared(Rc<StoreRev>);
 
 impl StoreRevShared {
-    pub fn apply_change(prev: Arc<dyn MemStoreR>, writes: &[SpaceWrite]) -> Option<StoreRevShared> {
+    pub fn apply_change(prev: Rc<dyn MemStoreR>, writes: &[SpaceWrite]) -> Option<StoreRevShared> {
         let deltas = StoreDelta::new(prev.as_ref(), writes)?;
-        Some(Self(Arc::new(StoreRev { prev, deltas })))
+        Some(Self(Rc::new(StoreRev { prev, deltas })))
     }
 }
 
@@ -260,12 +260,12 @@ impl MemStore for StoreRevShared {
 
 #[derive(Clone)]
 pub struct StoreRevMut {
-    prev: Arc<dyn MemStoreR>,
+    prev: Rc<dyn MemStoreR>,
     deltas: Rc<RefCell<HashMap<u64, Box<Page>>>>,
 }
 
 impl StoreRevMut {
-    pub fn new(prev: Arc<dyn MemStoreR>) -> Self {
+    pub fn new(prev: Rc<dyn MemStoreR>) -> Self {
         Self {
             prev,
             deltas: Rc::new(RefCell::new(HashMap::new())),
@@ -290,9 +290,21 @@ impl StoreRevMut {
     pub fn to_delta(&self) -> StoreDelta {
         let mut pages = Vec::new();
         for (pid, page) in self.deltas.borrow().iter() {
-            pages.push(DeltaPage(*pid, **page));
+            pages.push(DeltaPage(*pid, page.clone()));
         }
         StoreDelta(pages)
+    }
+
+    pub fn take_delta(&self) -> StoreDelta {
+        let mut pages = Vec::new();
+        for (pid, page) in std::mem::replace(&mut *self.deltas.borrow_mut(), HashMap::new()).into_iter() {
+            pages.push(DeltaPage(pid, page));
+        }
+        StoreDelta(pages)
+    }
+
+    pub fn len(&self) -> usize {
+        self.deltas.borrow().len()
     }
 }
 
@@ -361,11 +373,11 @@ impl MemStore for StoreRevMut {
 }
 
 #[derive(Clone)]
-pub struct ZeroStore(Arc<()>);
+pub struct ZeroStore(Rc<()>);
 
 impl ZeroStore {
     pub fn new() -> Self {
-        Self(Arc::new(()))
+        Self(Rc::new(()))
     }
 }
 
@@ -400,7 +412,7 @@ fn test_apply_change() {
             println!("[0x{:x}, 0x{:x})", l, r);
             writes.push(SpaceWrite { offset: l, data });
         }
-        let z = Arc::new(ZeroStore::new());
+        let z = Rc::new(ZeroStore::new());
         let rev = StoreRevShared::apply_change(z, &writes).unwrap();
         println!("{:?}", rev);
         assert_eq!(rev.get_ref(min, max - min).unwrap().deref(), &canvas);
@@ -452,6 +464,19 @@ impl CachedSpace {
             space_id,
         })
     }
+
+    /// Apply `delta` to the store and return the StoreDelta that can undo this change.
+    pub fn update(&self, delta: StoreDelta) -> Option<StoreDelta> {
+        let mut pages = Vec::new();
+        for DeltaPage(pid, page) in delta.0 {
+            let data = self.inner.borrow_mut().pin_page(self.space_id, pid).ok()?;
+            // save the original data
+            pages.push(DeltaPage(pid, Box::new(data.try_into().unwrap())));
+            // apply the change
+            data.copy_from_slice(page.as_ref());
+        }
+        Some(StoreDelta(pages))
+    }
 }
 
 impl CachedSpaceInner {
@@ -469,23 +494,23 @@ impl CachedSpaceInner {
         Ok(Box::new(page))
     }
 
-    fn pin_page(&mut self, space_id: SpaceID, pid: u64) -> Result<&'static [u8], StoreError> {
+    fn pin_page(&mut self, space_id: SpaceID, pid: u64) -> Result<&'static mut [u8], StoreError> {
         let base = match self.pinned_pages.get_mut(&pid) {
             Some(mut e) => {
                 e.0 += 1;
-                e.1.as_ptr()
+                e.1.as_mut_ptr()
             }
             None => {
-                let page = match self.cached_pages.pop(&pid) {
+                let mut page = match self.cached_pages.pop(&pid) {
                     Some(p) => p,
                     None => self.fetch_page(space_id, pid)?,
                 };
-                let ptr = page.as_ptr();
+                let ptr = page.as_mut_ptr();
                 self.pinned_pages.insert(pid, (1, page));
                 ptr
             }
         };
-        Ok(unsafe { std::slice::from_raw_parts(base, PAGE_SIZE as usize) })
+        Ok(unsafe { std::slice::from_raw_parts_mut(base, PAGE_SIZE as usize) })
     }
 
     fn unpin_page(&mut self, pid: u64) {
@@ -505,27 +530,23 @@ impl CachedSpaceInner {
         };
         self.cached_pages.put(pid, page);
     }
-
-    fn update_page(&mut self, pid: u64, data: &[u8]) {
-        if let Some(v) = self.pinned_pages.get_mut(&pid) {
-            v.1.copy_from_slice(data);
-            return
-        }
-        if let Some(v) = self.cached_pages.peek_mut(&pid) {
-            v.copy_from_slice(data);
-        }
-    }
 }
 
 struct PageRef {
     pid: u64,
-    data: &'static [u8],
+    data: &'static mut [u8],
     store: CachedSpace,
 }
 
 impl<'a> std::ops::Deref for PageRef {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
+        self.data
+    }
+}
+
+impl<'a> std::ops::DerefMut for PageRef {
+    fn deref_mut(&mut self) -> &mut [u8] {
         self.data
     }
 }
@@ -755,13 +776,13 @@ impl DiskBuffer {
                         match self.pending.entry(page_key) {
                             Occupied(mut e) => {
                                 let e = e.get_mut();
-                                e.data = Arc::new(w.1);
+                                e.data = w.1.into();
                                 e.updated = true;
                             }
                             Vacant(e) => {
                                 let file_nbit = self.file_pools[page_key.0 as usize].as_ref().unwrap().file_nbit;
                                 e.insert(PendingPage {
-                                    data: Arc::new(w.1),
+                                    data: w.1.into(),
                                     file_nbit,
                                     updated: false,
                                 });

@@ -1,5 +1,4 @@
 use std::rc::Rc;
-use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use parking_lot::{Mutex, MutexGuard};
@@ -7,7 +6,7 @@ use shale::{MemStore, MummyItem, ObjPtr, SpaceID};
 use typed_builder::TypedBuilder;
 
 use crate::file;
-use crate::merkle::{Merkle, MerkleHeader, Hash};
+use crate::merkle::{Hash, Merkle, MerkleHeader};
 use crate::storage::{CachedSpace, DiskBuffer, DiskBufferConfig, MemStoreR, StoreConfig, StoreRevMut};
 
 const MERKLE_META_SPACE: SpaceID = 0x0;
@@ -50,8 +49,10 @@ struct DBInner {
     merkle: Merkle<shale::compact::CompactSpace>,
     disk_requester: crate::storage::DiskBufferRequester,
     disk_thread: Option<JoinHandle<()>>,
-    mem_meta: Rc<StoreRevMut>,
-    mem_payload: Rc<StoreRevMut>,
+    staging_meta: Rc<StoreRevMut>,
+    staging_payload: Rc<StoreRevMut>,
+    cached_meta: Rc<CachedSpace>,
+    cached_payload: Rc<CachedSpace>,
 }
 
 impl Drop for DBInner {
@@ -101,7 +102,7 @@ impl DB {
         let mut offset = header_bytes.len() as u64;
         let header = unsafe { std::mem::transmute::<_, DBHeader>(header_bytes) };
 
-        let mem_meta = Arc::new(
+        let cached_meta = Rc::new(
             CachedSpace::new(
                 &StoreConfig::builder()
                     .ncached_pages(cfg.meta_ncached_pages)
@@ -113,7 +114,7 @@ impl DB {
             )
             .unwrap(),
         );
-        let mem_payload = Arc::new(
+        let cached_payload = Rc::new(
             CachedSpace::new(
                 &StoreConfig::builder()
                     .ncached_pages(cfg.compact_ncached_pages)
@@ -127,13 +128,13 @@ impl DB {
         );
 
         let mut disk_buffer = DiskBuffer::new(&DiskBufferConfig::builder().build()).unwrap();
-        disk_buffer.reg_cached_space(mem_meta.as_ref());
-        disk_buffer.reg_cached_space(mem_payload.as_ref());
+        disk_buffer.reg_cached_space(cached_meta.as_ref());
+        disk_buffer.reg_cached_space(cached_payload.as_ref());
         let disk_requester = disk_buffer.requester().clone();
         let disk_thread = Some(std::thread::spawn(move || disk_buffer.run()));
 
-        let mem_meta = Rc::new(StoreRevMut::new(mem_meta as Arc<dyn MemStoreR>));
-        let mem_payload = Rc::new(StoreRevMut::new(mem_payload as Arc<dyn MemStoreR>));
+        let staging_meta = Rc::new(StoreRevMut::new(cached_meta.clone() as Rc<dyn MemStoreR>));
+        let staging_payload = Rc::new(StoreRevMut::new(cached_payload.clone() as Rc<dyn MemStoreR>));
 
         // set up the storage layout
         let compact_header: ObjPtr<CompactSpaceHeader>;
@@ -150,28 +151,28 @@ impl DB {
 
         if reset {
             // initialize headers
-            mem_meta.write(
+            staging_meta.write(
                 compact_header.addr(),
                 &shale::compact::CompactSpaceHeader::new(SPACE_RESERVED, SPACE_RESERVED).dehydrate(),
             );
-            mem_meta.write(merkle_header.addr(), &MerkleHeader::new_empty().dehydrate());
+            staging_meta.write(merkle_header.addr(), &MerkleHeader::new_empty().dehydrate());
         }
 
-        let mem_meta_ref = mem_meta.as_ref() as &dyn MemStore;
+        let staging_meta_ref = staging_meta.as_ref() as &dyn MemStore;
         let ch_ref;
         let mh_ref;
         unsafe {
-            ch_ref = shale::get_obj_ref(mem_meta_ref, compact_header, shale::compact::CompactHeader::MSIZE)
+            ch_ref = shale::get_obj_ref(staging_meta_ref, compact_header, shale::compact::CompactHeader::MSIZE)
                 .unwrap()
                 .to_longlive();
-            mh_ref = shale::get_obj_ref(mem_meta_ref, merkle_header, MerkleHeader::MSIZE)
+            mh_ref = shale::get_obj_ref(staging_meta_ref, merkle_header, MerkleHeader::MSIZE)
                 .unwrap()
                 .to_longlive();
         }
 
         let space = shale::compact::CompactSpace::new(
-            mem_meta.clone(),
-            mem_payload.clone(),
+            staging_meta.clone(),
+            staging_payload.clone(),
             ch_ref,
             cfg.compact_max_walk,
             header.compact_regn_nbit,
@@ -182,8 +183,10 @@ impl DB {
             merkle,
             disk_thread,
             disk_requester,
-            mem_meta,
-            mem_payload,
+            staging_meta,
+            staging_payload,
+            cached_meta,
+            cached_payload,
         })))
     }
 
@@ -218,13 +221,22 @@ impl<'a> WriteBatch<'a> {
         let inner = self.m;
         inner.disk_requester.write(vec![
             BufferWrite {
-                space_id: inner.mem_payload.id(),
-                delta: inner.mem_payload.to_delta(),
+                space_id: inner.staging_payload.id(),
+                delta: inner.staging_payload.to_delta(),
             },
             BufferWrite {
-                space_id: inner.mem_meta.id(),
-                delta: inner.mem_meta.to_delta(),
+                space_id: inner.staging_meta.id(),
+                delta: inner.staging_meta.to_delta(),
             },
         ]);
+        // clear the staging layer and apply changes to the CachedSpace
+        inner.cached_meta.update(inner.staging_meta.take_delta());
+        inner.cached_payload.update(inner.staging_payload.take_delta());
+    }
+
+    pub fn abort(self) {
+        // drop the staging changes
+        self.m.staging_payload.take_delta();
+        self.m.staging_meta.take_delta();
     }
 }
