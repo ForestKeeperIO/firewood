@@ -39,7 +39,7 @@ fn main() {
         println!("{}\n{}", hex::encode(&*db.root_hash()), db.dump());
     }
     {
-        let db = DB::new("persistent_merkle_simple", &cfg.truncate(false).build()).unwrap();
+        let db = DB::new("persistent_merkle_simple", &cfg.clone().truncate(false).build()).unwrap();
         println!("{}\n{}", hex::encode(&*db.root_hash()), db.dump());
         use rand::{Rng, SeedableRng};
         let mut rng = rand::rngs::StdRng::seed_from_u64(0);
@@ -52,6 +52,10 @@ fn main() {
             }
             wb.commit();
         }
+        println!("{}\n{}", hex::encode(&*db.root_hash()), db.dump());
+    }
+    {
+        let db = DB::new("persistent_merkle_simple", &cfg.truncate(false).build()).unwrap();
         println!("{}\n{}", hex::encode(&*db.root_hash()), db.dump());
     }
 }

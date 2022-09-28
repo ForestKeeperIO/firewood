@@ -885,7 +885,9 @@ impl DiskBuffer {
                     notifier.add_permits(1)
                 }
                 //if slot.updated {
-                if !slot.staging_notifiers.is_empty() {
+                if slot.staging_notifiers.is_empty() {
+                    e.remove();
+                } else {
                     assert!(slot.writing_notifiers.is_empty());
                     std::mem::swap(&mut slot.writing_notifiers, &mut slot.staging_notifiers);
                     // write again
@@ -991,7 +993,6 @@ impl DiskBuffer {
                 let max_revisions = self.cfg.max_revisions;
                 self.start_task(async move {
                     let _ = sem.acquire_many(npermit).await.unwrap();
-                    println!("peel");
                     wal.borrow_mut()
                         .peel(ring_ids, max_revisions)
                         .await
@@ -1043,11 +1044,9 @@ impl DiskBuffer {
                     .iter_mut()
                     .map(|(_, task)| task.take().unwrap())
                     .collect();
-                println!("begin");
                 for h in handles {
                     h.await.unwrap();
                 }
-                println!("end");
             })
             .await;
     }
