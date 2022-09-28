@@ -1,5 +1,5 @@
 use std::cell::{RefCell, RefMut};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::num::NonZeroUsize;
 use std::rc::Rc;
@@ -35,13 +35,13 @@ pub struct SpaceWrite {
 }
 
 #[derive(Debug)]
-pub struct RecoverableSpaceWrite {
+pub struct Ash {
     space_id: SpaceID,
     old: Vec<SpaceWrite>,
     new: Vec<Box<[u8]>>,
 }
 
-impl RecoverableSpaceWrite {
+impl Ash {
     fn new(space_id: SpaceID) -> Self {
         Self {
             space_id,
@@ -52,9 +52,9 @@ impl RecoverableSpaceWrite {
 }
 
 #[derive(Debug)]
-pub struct BatchedSpaceWrite(pub Vec<RecoverableSpaceWrite>);
+pub struct AshRecord(pub Vec<Ash>);
 
-impl growthring::wal::Record for BatchedSpaceWrite {
+impl growthring::wal::Record for AshRecord {
     fn serialize(&self) -> growthring::wal::WALBytes {
         let mut bytes = Vec::new();
         bytes.extend((self.0.len() as u64).to_le_bytes());
@@ -72,7 +72,7 @@ impl growthring::wal::Record for BatchedSpaceWrite {
     }
 }
 
-impl BatchedSpaceWrite {
+impl AshRecord {
     fn deserialize(raw: growthring::wal::WALBytes) -> Self {
         let mut r = &raw[..];
         let len = u64::from_le_bytes(r[..8].try_into().unwrap());
@@ -98,7 +98,7 @@ impl BatchedSpaceWrite {
                     old.push(old_write);
                     new.push(new_data);
                 }
-                RecoverableSpaceWrite { space_id, old, new }
+                Ash { space_id, old, new }
             })
             .collect();
         Self(writes)
@@ -336,7 +336,7 @@ impl MemStore for StoreRevShared {
 
 struct StoreRevMutDelta {
     pages: HashMap<u64, Box<Page>>,
-    plain: RecoverableSpaceWrite,
+    plain: Ash,
 }
 
 #[derive(Clone)]
@@ -352,7 +352,7 @@ impl StoreRevMut {
             prev,
             deltas: Rc::new(RefCell::new(StoreRevMutDelta {
                 pages: HashMap::new(),
-                plain: RecoverableSpaceWrite::new(space_id),
+                plain: Ash::new(space_id),
             })),
         }
     }
@@ -380,13 +380,13 @@ impl StoreRevMut {
         StoreDelta(pages)
     }
 
-    pub fn take_delta(&self) -> (StoreDelta, RecoverableSpaceWrite) {
+    pub fn take_delta(&self) -> (StoreDelta, Ash) {
         let mut pages = Vec::new();
         let deltas = std::mem::replace(
             &mut *self.deltas.borrow_mut(),
             StoreRevMutDelta {
                 pages: HashMap::new(),
-                plain: RecoverableSpaceWrite::new(self.id()),
+                plain: Ash::new(self.id()),
             },
         );
         for (pid, page) in deltas.pages.into_iter() {
@@ -446,6 +446,7 @@ impl MemStore for StoreRevMut {
         let e_pid = end >> PAGE_SIZE_NBIT;
         let e_off = (end & PAGE_MASK) as usize;
         let mut old: Vec<u8> = Vec::new();
+        let new: Box<[u8]> = change.into();
         if s_pid == e_pid {
             let slice = &mut self.get_page_mut(s_pid)[s_off..e_off + 1];
             old.extend(&*slice);
@@ -469,11 +470,12 @@ impl MemStore for StoreRevMut {
             slice.copy_from_slice(change);
         }
         let plain = &mut self.deltas.borrow_mut().plain;
+        assert!(old.len() == new.len());
         plain.old.push(SpaceWrite {
             offset,
             data: old.into(),
         });
-        plain.new.push(change.into());
+        plain.new.push(new);
     }
 
     fn id(&self) -> SpaceID {
@@ -767,7 +769,7 @@ pub struct BufferWrite {
 enum BufferCmd {
     InitWAL(Fd, String),
     GetPage((SpaceID, u64), oneshot::Sender<Option<Arc<Page>>>),
-    WriteBatch(Vec<BufferWrite>, BatchedSpaceWrite),
+    WriteBatch(Vec<BufferWrite>, AshRecord),
     Shutdown,
 }
 
@@ -813,6 +815,8 @@ pub struct DiskBuffer {
     task_id: u64,
     tasks: Rc<RefCell<HashMap<u64, Option<tokio::task::JoinHandle<()>>>>>,
     wal: Option<Rc<RefCell<WALWriter<WALStoreAIO>>>>,
+    wal_pending_queue: VecDeque<(Vec<BufferWrite>, AshRecord)>,
+    wal_done_queue: VecDeque<Vec<BufferWrite>>,
     cfg: DiskBufferConfig,
 }
 
@@ -842,6 +846,8 @@ impl DiskBuffer {
             task_id: 0,
             tasks: Rc::new(RefCell::new(HashMap::new())),
             wal: None,
+            wal_pending_queue: VecDeque::new(),
+            wal_done_queue: VecDeque::new(),
         })
     }
 
@@ -884,7 +890,6 @@ impl DiskBuffer {
                 for notifier in std::mem::replace(&mut slot.writing_notifiers, Vec::new()) {
                     notifier.add_permits(1)
                 }
-                //if slot.updated {
                 if slot.staging_notifiers.is_empty() {
                     e.remove();
                 } else {
@@ -916,8 +921,8 @@ impl DiskBuffer {
             .load(
                 store,
                 |raw, _| {
-                    let batch = BatchedSpaceWrite::deserialize(raw);
-                    for RecoverableSpaceWrite { space_id, old, new } in batch.0 {
+                    let batch = AshRecord::deserialize(raw);
+                    for Ash { space_id, old, new } in batch.0 {
                         for (old, data) in old.into_iter().zip(new.into_iter()) {
                             let offset = old.offset;
                             let file_pool = self.file_pools[space_id as usize].as_ref().unwrap();
@@ -961,6 +966,7 @@ impl DiskBuffer {
                         .into_iter()
                         .map(|ring| ring.map_err(|_| "WAL Error while writing").unwrap().1)
                         .collect();
+                println!("done");
                 let sem = Rc::new(tokio::sync::Semaphore::new(0));
                 let mut npermit = 0;
                 for BufferWrite { space_id, delta } in writes {
@@ -1084,7 +1090,7 @@ impl DiskBufferRequester {
         resp_rx.blocking_recv().unwrap()
     }
 
-    pub fn write(&self, page_batch: Vec<BufferWrite>, write_batch: BatchedSpaceWrite) {
+    pub fn write(&self, page_batch: Vec<BufferWrite>, write_batch: AshRecord) {
         self.sender
             .blocking_send(BufferCmd::WriteBatch(page_batch, write_batch))
             .unwrap()

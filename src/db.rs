@@ -241,7 +241,7 @@ impl<'a> WriteBatch<'a> {
                     delta: meta_pages,
                 },
             ],
-            crate::storage::BatchedSpaceWrite(vec![payload_plain, meta_plain])
+            crate::storage::AshRecord(vec![payload_plain, meta_plain])
         );
     }
 

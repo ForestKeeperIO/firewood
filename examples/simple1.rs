@@ -8,9 +8,11 @@ fn main() {
         .compact_ncached_files(128)
         .buffer(
             DiskBufferConfig::builder()
-                .wal_file_nbit(9)
-                .wal_block_nbit(8)
-                .max_revisions(0)
+            /*
+                .wal_file_nbit(15)
+                .wal_block_nbit(10)
+            */
+                .max_revisions(10)
                 .build(),
         );
     {
@@ -43,7 +45,7 @@ fn main() {
         println!("{}\n{}", hex::encode(&*db.root_hash()), db.dump());
         use rand::{Rng, SeedableRng};
         let mut rng = rand::rngs::StdRng::seed_from_u64(0);
-        for _ in 0..10 {
+        for _ in 0..30 {
             let mut wb = db.new_writebatch();
             for _ in 0..10 {
                 let key = "a".repeat(rng.gen_range(1..100));
