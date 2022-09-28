@@ -7,7 +7,8 @@ use typed_builder::TypedBuilder;
 
 use crate::file;
 use crate::merkle::{Hash, Merkle, MerkleHeader};
-use crate::storage::{CachedSpace, DiskBuffer, DiskBufferConfig, MemStoreR, StoreConfig, StoreRevMut};
+use crate::storage::{CachedSpace, DiskBuffer, MemStoreR, StoreConfig, StoreRevMut};
+pub use crate::storage::DiskBufferConfig;
 
 const MERKLE_META_SPACE: SpaceID = 0x0;
 const MERKLE_COMPACT_SPACE: SpaceID = 0x1;
@@ -43,6 +44,8 @@ pub struct DBConfig {
     compact_regn_nbit: u64,
     #[builder(default = false)]
     truncate: bool,
+    #[builder(default = DiskBufferConfig::builder().build())]
+    buffer: DiskBufferConfig,
 }
 
 struct DBInner {
@@ -70,9 +73,9 @@ impl DB {
         if cfg.truncate {
             let _ = std::fs::remove_dir_all(db_path);
         }
-        let (fd0, reset) = file::open_dir(db_path, cfg.truncate).map_err(DBError::System)?;
-        let meta_fd = file::touch_dir("meta", fd0).map_err(DBError::System)?;
-        let compact_fd = file::touch_dir("compact", fd0).map_err(DBError::System)?;
+        let (db_fd, reset) = file::open_dir(db_path, cfg.truncate).map_err(DBError::System)?;
+        let meta_fd = file::touch_dir("meta", db_fd).map_err(DBError::System)?;
+        let compact_fd = file::touch_dir("compact", db_fd).map_err(DBError::System)?;
 
         let file0 = crate::file::File::new(0, SPACE_RESERVED, meta_fd).map_err(DBError::System)?;
         let fd0 = file0.get_fd();
@@ -127,7 +130,7 @@ impl DB {
             .unwrap(),
         );
 
-        let mut disk_buffer = DiskBuffer::new(&DiskBufferConfig::builder().build()).unwrap();
+        let mut disk_buffer = DiskBuffer::new(&cfg.buffer).unwrap();
         disk_buffer.reg_cached_space(cached_meta.as_ref());
         disk_buffer.reg_cached_space(cached_payload.as_ref());
         let disk_requester = disk_buffer.requester().clone();
@@ -178,6 +181,7 @@ impl DB {
             header.compact_regn_nbit,
         )
         .unwrap();
+        disk_requester.init_wal("wal", db_fd);
         let merkle = Merkle::new(mh_ref, space);
         Ok(Self(Mutex::new(DBInner {
             merkle,
@@ -219,19 +223,26 @@ impl<'a> WriteBatch<'a> {
     pub fn commit(self) {
         use crate::storage::BufferWrite;
         let inner = self.m;
-        inner.disk_requester.write(vec![
-            BufferWrite {
-                space_id: inner.staging_payload.id(),
-                delta: inner.staging_payload.to_delta(),
-            },
-            BufferWrite {
-                space_id: inner.staging_meta.id(),
-                delta: inner.staging_meta.to_delta(),
-            },
-        ]);
         // clear the staging layer and apply changes to the CachedSpace
-        inner.cached_meta.update(inner.staging_meta.take_delta());
-        inner.cached_payload.update(inner.staging_payload.take_delta());
+        let (payload_pages, payload_plain) = inner.staging_payload.take_delta();
+        let (meta_pages, meta_plain) = inner.staging_meta.take_delta();
+
+        inner.cached_payload.update(&payload_pages);
+        inner.cached_meta.update(&meta_pages);
+
+        inner.disk_requester.write(
+            vec![
+                BufferWrite {
+                    space_id: inner.staging_payload.id(),
+                    delta: payload_pages,
+                },
+                BufferWrite {
+                    space_id: inner.staging_meta.id(),
+                    delta: meta_pages,
+                },
+            ],
+            crate::storage::BatchedSpaceWrite(vec![payload_plain, meta_plain])
+        );
     }
 
     pub fn abort(self) {

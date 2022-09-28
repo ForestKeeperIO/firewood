@@ -6,9 +6,13 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use aiofut::{AIOBuilder, AIOManager};
+use growthring::{
+    wal::{RecoverPolicy, WALLoader, WALWriter},
+    WALStoreAIO,
+};
 use nix::fcntl::{flock, FlockArg};
 use shale::{MemStore, MemView, SpaceID};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Semaphore};
 use typed_builder::TypedBuilder;
 
 use crate::file::{Fd, File};
@@ -24,9 +28,81 @@ pub trait MemStoreR {
 
 type Page = [u8; PAGE_SIZE as usize];
 
+#[derive(Debug)]
 pub struct SpaceWrite {
     offset: u64,
     data: Box<[u8]>,
+}
+
+#[derive(Debug)]
+pub struct RecoverableSpaceWrite {
+    space_id: SpaceID,
+    old: Vec<SpaceWrite>,
+    new: Vec<Box<[u8]>>,
+}
+
+impl RecoverableSpaceWrite {
+    fn new(space_id: SpaceID) -> Self {
+        Self {
+            space_id,
+            old: Vec::new(),
+            new: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct BatchedSpaceWrite(pub Vec<RecoverableSpaceWrite>);
+
+impl growthring::wal::Record for BatchedSpaceWrite {
+    fn serialize(&self) -> growthring::wal::WALBytes {
+        let mut bytes = Vec::new();
+        bytes.extend((self.0.len() as u64).to_le_bytes());
+        for w in self.0.iter() {
+            bytes.extend((w.space_id as u8).to_le_bytes());
+            bytes.extend((w.old.len() as u32).to_le_bytes());
+            for (sw_old, sw_new) in w.old.iter().zip(w.new.iter()) {
+                bytes.extend(sw_old.offset.to_le_bytes());
+                bytes.extend((sw_old.data.len() as u64).to_le_bytes());
+                bytes.extend(&*sw_old.data);
+                bytes.extend(&**sw_new);
+            }
+        }
+        bytes.into()
+    }
+}
+
+impl BatchedSpaceWrite {
+    fn deserialize(raw: growthring::wal::WALBytes) -> Self {
+        let mut r = &raw[..];
+        let len = u64::from_le_bytes(r[..8].try_into().unwrap());
+        r = &r[8..];
+        let writes = (0..len)
+            .map(|_| {
+                let space_id = u8::from_le_bytes(r[..1].try_into().unwrap());
+                let wlen = u32::from_le_bytes(r[1..5].try_into().unwrap());
+                r = &r[5..];
+                let mut old = Vec::new();
+                let mut new = Vec::new();
+                for _ in 0..wlen {
+                    let offset = u64::from_le_bytes(r[..8].try_into().unwrap());
+                    let data_len = u64::from_le_bytes(r[8..16].try_into().unwrap());
+                    r = &r[16..];
+                    let old_write = SpaceWrite {
+                        offset,
+                        data: r[..data_len as usize].into(),
+                    };
+                    r = &r[data_len as usize..];
+                    let new_data: Box<[u8]> = r[..data_len as usize].into();
+                    r = &r[data_len as usize..];
+                    old.push(old_write);
+                    new.push(new_data);
+                }
+                RecoverableSpaceWrite { space_id, old, new }
+            })
+            .collect();
+        Self(writes)
+    }
 }
 
 /// Basic copy-on-write item in the linear storage space for multi-versioning.
@@ -258,23 +334,32 @@ impl MemStore for StoreRevShared {
     }
 }
 
+struct StoreRevMutDelta {
+    pages: HashMap<u64, Box<Page>>,
+    plain: RecoverableSpaceWrite,
+}
+
 #[derive(Clone)]
 pub struct StoreRevMut {
     prev: Rc<dyn MemStoreR>,
-    deltas: Rc<RefCell<HashMap<u64, Box<Page>>>>,
+    deltas: Rc<RefCell<StoreRevMutDelta>>,
 }
 
 impl StoreRevMut {
     pub fn new(prev: Rc<dyn MemStoreR>) -> Self {
+        let space_id = prev.id();
         Self {
             prev,
-            deltas: Rc::new(RefCell::new(HashMap::new())),
+            deltas: Rc::new(RefCell::new(StoreRevMutDelta {
+                pages: HashMap::new(),
+                plain: RecoverableSpaceWrite::new(space_id),
+            })),
         }
     }
 
     fn get_page_mut(&self, pid: u64) -> RefMut<[u8]> {
         let mut deltas = self.deltas.borrow_mut();
-        if deltas.get(&pid).is_none() {
+        if deltas.pages.get(&pid).is_none() {
             let page = Box::new(
                 self.prev
                     .get_slice(pid << PAGE_SIZE_NBIT, PAGE_SIZE)
@@ -282,29 +367,36 @@ impl StoreRevMut {
                     .try_into()
                     .unwrap(),
             );
-            deltas.insert(pid, page);
+            deltas.pages.insert(pid, page);
         }
-        RefMut::map(deltas, |e| &mut e.get_mut(&pid).unwrap()[..])
+        RefMut::map(deltas, |e| &mut e.pages.get_mut(&pid).unwrap()[..])
     }
 
-    pub fn to_delta(&self) -> StoreDelta {
+    pub fn to_delta_pages(&self) -> StoreDelta {
         let mut pages = Vec::new();
-        for (pid, page) in self.deltas.borrow().iter() {
+        for (pid, page) in self.deltas.borrow().pages.iter() {
             pages.push(DeltaPage(*pid, page.clone()));
         }
         StoreDelta(pages)
     }
 
-    pub fn take_delta(&self) -> StoreDelta {
+    pub fn take_delta(&self) -> (StoreDelta, RecoverableSpaceWrite) {
         let mut pages = Vec::new();
-        for (pid, page) in std::mem::replace(&mut *self.deltas.borrow_mut(), HashMap::new()).into_iter() {
+        let deltas = std::mem::replace(
+            &mut *self.deltas.borrow_mut(),
+            StoreRevMutDelta {
+                pages: HashMap::new(),
+                plain: RecoverableSpaceWrite::new(self.id()),
+            },
+        );
+        for (pid, page) in deltas.pages.into_iter() {
             pages.push(DeltaPage(pid, page));
         }
-        StoreDelta(pages)
+        (StoreDelta(pages), deltas.plain)
     }
 
     pub fn len(&self) -> usize {
-        self.deltas.borrow().len()
+        self.deltas.borrow().pages.len()
     }
 }
 
@@ -318,7 +410,7 @@ impl MemStore for StoreRevMut {
             let s_off = (offset & PAGE_MASK) as usize;
             let e_pid = end >> PAGE_SIZE_NBIT;
             let e_off = (end & PAGE_MASK) as usize;
-            let deltas = self.deltas.borrow();
+            let deltas = &self.deltas.borrow().pages;
             if s_pid == e_pid {
                 match deltas.get(&s_pid) {
                     Some(p) => p[s_off..e_off + 1].to_vec(),
@@ -353,18 +445,35 @@ impl MemStore for StoreRevMut {
         let s_off = (offset & PAGE_MASK) as usize;
         let e_pid = end >> PAGE_SIZE_NBIT;
         let e_off = (end & PAGE_MASK) as usize;
+        let mut old: Vec<u8> = Vec::new();
         if s_pid == e_pid {
-            self.get_page_mut(s_pid)[s_off..e_off + 1].copy_from_slice(change)
+            let slice = &mut self.get_page_mut(s_pid)[s_off..e_off + 1];
+            old.extend(&*slice);
+            slice.copy_from_slice(change)
         } else {
             let len = PAGE_SIZE as usize - s_off;
-            self.get_page_mut(s_pid)[s_off..].copy_from_slice(&change[..len]);
+            {
+                let slice = &mut self.get_page_mut(s_pid)[s_off..];
+                old.extend(&*slice);
+                slice.copy_from_slice(&change[..len]);
+            }
             change = &change[..len];
             for p in s_pid + 1..e_pid {
-                self.get_page_mut(p).copy_from_slice(&change[..PAGE_SIZE as usize]);
+                let mut slice = self.get_page_mut(p);
+                old.extend(&*slice);
+                slice.copy_from_slice(&change[..PAGE_SIZE as usize]);
                 change = &change[..PAGE_SIZE as usize];
             }
-            self.get_page_mut(e_pid)[..e_off + 1].copy_from_slice(change);
+            let slice = &mut self.get_page_mut(e_pid)[..e_off + 1];
+            old.extend(&*slice);
+            slice.copy_from_slice(change);
         }
+        let plain = &mut self.deltas.borrow_mut().plain;
+        plain.old.push(SpaceWrite {
+            offset,
+            data: old.into(),
+        });
+        plain.new.push(change.into());
     }
 
     fn id(&self) -> SpaceID {
@@ -466,12 +575,12 @@ impl CachedSpace {
     }
 
     /// Apply `delta` to the store and return the StoreDelta that can undo this change.
-    pub fn update(&self, delta: StoreDelta) -> Option<StoreDelta> {
+    pub fn update(&self, delta: &StoreDelta) -> Option<StoreDelta> {
         let mut pages = Vec::new();
-        for DeltaPage(pid, page) in delta.0 {
-            let data = self.inner.borrow_mut().pin_page(self.space_id, pid).ok()?;
+        for DeltaPage(pid, page) in &delta.0 {
+            let data = self.inner.borrow_mut().pin_page(self.space_id, *pid).ok()?;
             // save the original data
-            pages.push(DeltaPage(pid, Box::new(data.try_into().unwrap())));
+            pages.push(DeltaPage(*pid, Box::new(data.try_into().unwrap())));
             // apply the change
             data.copy_from_slice(page.as_ref());
         }
@@ -656,12 +765,13 @@ pub struct BufferWrite {
 
 #[derive(Debug)]
 enum BufferCmd {
+    InitWAL(Fd, String),
     GetPage((SpaceID, u64), oneshot::Sender<Option<Arc<Page>>>),
-    WriteBatch(Vec<BufferWrite>),
+    WriteBatch(Vec<BufferWrite>, BatchedSpaceWrite),
     Shutdown,
 }
 
-#[derive(TypedBuilder)]
+#[derive(TypedBuilder, Clone)]
 pub struct DiskBufferConfig {
     #[builder(default = 4096)]
     max_buffered: usize,
@@ -673,12 +783,22 @@ pub struct DiskBufferConfig {
     max_aio_response: u16,
     #[builder(default = 128)]
     max_aio_submit: usize,
+    #[builder(default = 32)]
+    wal_max_aio_requests: usize,
+    #[builder(default = 22)] // 4MB WAL logs
+    wal_file_nbit: u64,
+    #[builder(default = 15)] // 32KB
+    wal_block_nbit: u64,
+    #[builder(default = 100)] // preserve 100 past commits
+    max_revisions: u32,
 }
 
 struct PendingPage {
-    data: Arc<Page>,
+    staging_data: Arc<Page>,
     file_nbit: u64,
-    updated: bool,
+    //updated: bool,
+    staging_notifiers: Vec<Rc<Semaphore>>,
+    writing_notifiers: Vec<Rc<Semaphore>>,
 }
 
 pub struct DiskBuffer {
@@ -689,8 +809,11 @@ pub struct DiskBuffer {
     fc_blocker: Option<oneshot::Receiver<()>>,
     file_pools: [Option<Rc<FilePool>>; 255],
     aiomgr: AIOManager,
-    max_pending: usize,
     local_pool: Rc<tokio::task::LocalSet>,
+    task_id: u64,
+    tasks: Rc<RefCell<HashMap<u64, Option<tokio::task::JoinHandle<()>>>>>,
+    wal: Option<Rc<RefCell<WALWriter<WALStoreAIO>>>>,
+    cfg: DiskBufferConfig,
 }
 
 impl DiskBuffer {
@@ -699,7 +822,6 @@ impl DiskBuffer {
 
         let (sender, inbound) = mpsc::channel(cfg.max_buffered);
         let requester = DiskBufferRequester::new(sender);
-        let max_pending = cfg.max_pending;
         let aiomgr = AIOBuilder::default()
             .max_events(cfg.max_aio_requests)
             .max_nwait(cfg.max_aio_response)
@@ -709,7 +831,7 @@ impl DiskBuffer {
 
         Some(Self {
             pending: HashMap::new(),
-            max_pending,
+            cfg: cfg.clone(),
             inbound,
             requester,
             fc_notifier: None,
@@ -717,6 +839,9 @@ impl DiskBuffer {
             file_pools: [INIT; 255],
             aiomgr,
             local_pool: Rc::new(tokio::task::LocalSet::new()),
+            task_id: 0,
+            tasks: Rc::new(RefCell::new(HashMap::new())),
+            wal: None,
         })
     }
 
@@ -742,9 +867,9 @@ impl DiskBuffer {
             .unwrap();
         let fut = self
             .aiomgr
-            .write(file.get_fd(), offset & fmask, Box::new(*p.data), None);
+            .write(file.get_fd(), offset & fmask, Box::new(*p.staging_data), None);
         let s = unsafe { self.get_longlive_self() };
-        self.local_pool.spawn_local(async move {
+        self.start_task(async move {
             let (res, _) = fut.await;
             res.unwrap();
             s.finish_write(page_key);
@@ -754,8 +879,14 @@ impl DiskBuffer {
     fn finish_write(&mut self, page_key: (SpaceID, u64)) {
         use std::collections::hash_map::Entry::*;
         match self.pending.entry(page_key) {
-            Occupied(e) => {
-                if e.get().updated {
+            Occupied(mut e) => {
+                let slot = e.get_mut();
+                for notifier in std::mem::replace(&mut slot.writing_notifiers, Vec::new()) {
+                    notifier.add_permits(1)
+                }
+                //if slot.updated {
+                if !slot.staging_notifiers.is_empty() {
+                    std::mem::swap(&mut slot.writing_notifiers, &mut slot.staging_notifiers);
                     // write again
                     self.schedule_write(page_key);
                 }
@@ -764,34 +895,109 @@ impl DiskBuffer {
         }
     }
 
+    async fn init_wal(&mut self, rootfd: Fd, waldir: String) -> Result<(), ()> {
+        let mut aiobuilder = AIOBuilder::default();
+        aiobuilder.max_events(self.cfg.wal_max_aio_requests as u32);
+        let aiomgr = aiobuilder.build().map_err(|_| ())?;
+        let store = WALStoreAIO::new(&waldir, false, Some(rootfd), Some(aiomgr)).map_err(|_| ())?;
+        let mut loader = WALLoader::new();
+        loader
+            .file_nbit(self.cfg.wal_file_nbit)
+            .block_nbit(self.cfg.wal_block_nbit)
+            .recover_policy(RecoverPolicy::Strict);
+        if self.wal.is_some() {
+            // already initialized
+            return Ok(())
+        }
+        let wal = loader
+            .load(
+                store,
+                |raw, _| {
+                    let batch = BatchedSpaceWrite::deserialize(raw);
+                    for RecoverableSpaceWrite { space_id, old, new } in batch.0 {
+                        for (old, data) in old.into_iter().zip(new.into_iter()) {
+                            let offset = old.offset;
+                            let file_pool = self.file_pools[space_id as usize].as_ref().unwrap();
+                            let file_nbit = file_pool.get_file_nbit();
+                            let file_mask = (1 << file_nbit) - 1;
+                            let fid = offset >> file_nbit;
+                            nix::sys::uio::pwrite(
+                                file_pool.get_file(fid).map_err(|_| ())?.get_fd(),
+                                &*data,
+                                (offset & file_mask) as nix::libc::off_t,
+                            )
+                            .map_err(|_| ())?;
+                        }
+                    }
+                    Ok(())
+                },
+                self.cfg.max_revisions,
+            )
+            .await?;
+        self.wal = Some(Rc::new(RefCell::new(wal)));
+        Ok(())
+    }
+
     async fn process(&mut self, req: BufferCmd) -> bool {
         use std::collections::hash_map::Entry::*;
         match req {
             BufferCmd::Shutdown => return false,
-            BufferCmd::GetPage(page_key, tx) => tx.send(self.pending.get(&page_key).map(|e| e.data.clone())).unwrap(),
-            BufferCmd::WriteBatch(writes) => {
+            BufferCmd::InitWAL(rootfd, waldir) => {
+                if let Err(_) = self.init_wal(rootfd, waldir).await {
+                    panic!("cannot initialize from WAL")
+                }
+            }
+            BufferCmd::GetPage(page_key, tx) => tx
+                .send(self.pending.get(&page_key).map(|e| e.staging_data.clone()))
+                .unwrap(),
+            BufferCmd::WriteBatch(writes, wal_writes) => {
+                // first write to WAL
+                let ring_ids: Vec<_> =
+                    futures::future::join_all(self.wal.as_mut().unwrap().borrow_mut().grow(vec![wal_writes]))
+                        .await
+                        .into_iter()
+                        .map(|ring| ring.map_err(|_| "WAL Error while writing").unwrap().1)
+                        .collect();
+                let sem = Rc::new(tokio::sync::Semaphore::new(0));
+                let mut npermit = 0;
                 for BufferWrite { space_id, delta } in writes {
                     for w in delta.0 {
                         let page_key = (space_id, w.0);
                         match self.pending.entry(page_key) {
                             Occupied(mut e) => {
                                 let e = e.get_mut();
-                                e.data = w.1.into();
-                                e.updated = true;
+                                e.staging_data = w.1.into();
+                                e.staging_notifiers.push(sem.clone());
+                                npermit += 1;
+                                //e.updated = true;
                             }
                             Vacant(e) => {
                                 let file_nbit = self.file_pools[page_key.0 as usize].as_ref().unwrap().file_nbit;
                                 e.insert(PendingPage {
-                                    data: w.1.into(),
+                                    staging_data: w.1.into(),
                                     file_nbit,
-                                    updated: false,
+                                    //updated: false,
+                                    staging_notifiers: Vec::new(),
+                                    writing_notifiers: vec![sem.clone()],
                                 });
+                                npermit += 1;
                                 self.schedule_write(page_key);
                             }
                         }
                     }
                 }
-                if self.pending.len() >= self.max_pending {
+                let wal = self.wal.as_ref().unwrap().clone();
+                let max_revisions = self.cfg.max_revisions;
+                self.start_task(async move {
+                    let _ = sem.acquire_many(npermit).await.unwrap();
+                    println!("peel");
+                    wal.borrow_mut()
+                        .peel(ring_ids, max_revisions)
+                        .await
+                        .map_err(|_| "WAL errore while pruning")
+                        .unwrap();
+                });
+                if self.pending.len() >= self.cfg.max_pending {
                     let (tx, rx) = oneshot::channel();
                     self.fc_notifier = Some(tx);
                     self.fc_blocker = Some(rx);
@@ -799,6 +1005,19 @@ impl DiskBuffer {
             }
         }
         true
+    }
+
+    fn start_task<F: std::future::Future<Output = ()> + 'static>(&mut self, fut: F) {
+        let task_id = self.task_id;
+        self.task_id += 1;
+        let tasks = self.tasks.clone();
+        self.tasks.borrow_mut().insert(
+            task_id,
+            Some(self.local_pool.spawn_local(async move {
+                fut.await;
+                tasks.borrow_mut().remove(&task_id);
+            })),
+        );
     }
 
     #[tokio::main(flavor = "current_thread")]
@@ -816,6 +1035,15 @@ impl DiskBuffer {
                     if !self.process(req).await {
                         break
                     }
+                }
+                let handles: Vec<_> = self
+                    .tasks
+                    .borrow_mut()
+                    .iter_mut()
+                    .map(|(_, task)| task.take().unwrap())
+                    .collect();
+                for h in handles {
+                    h.await.unwrap();
                 }
             })
             .await;
@@ -854,12 +1082,20 @@ impl DiskBufferRequester {
         resp_rx.blocking_recv().unwrap()
     }
 
-    pub fn write(&self, batch: Vec<BufferWrite>) {
-        self.sender.blocking_send(BufferCmd::WriteBatch(batch)).unwrap()
+    pub fn write(&self, page_batch: Vec<BufferWrite>, write_batch: BatchedSpaceWrite) {
+        self.sender
+            .blocking_send(BufferCmd::WriteBatch(page_batch, write_batch))
+            .unwrap()
     }
 
     pub fn shutdown(&self) {
         self.sender.blocking_send(BufferCmd::Shutdown).unwrap()
+    }
+
+    pub fn init_wal(&self, waldir: &str, rootfd: Fd) {
+        self.sender
+            .blocking_send(BufferCmd::InitWAL(rootfd, waldir.to_string()))
+            .unwrap()
     }
 }
 
