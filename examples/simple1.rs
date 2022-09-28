@@ -1,7 +1,6 @@
 use firewood::db::{DBConfig, DiskBufferConfig, DB};
 
-#[test]
-fn test_persistent_merkle_simple() {
+fn main() {
     let cfg = DBConfig::builder()
         .meta_ncached_pages(1024)
         .meta_ncached_files(128)

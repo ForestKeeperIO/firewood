@@ -457,12 +457,12 @@ impl MemStore for StoreRevMut {
                 old.extend(&*slice);
                 slice.copy_from_slice(&change[..len]);
             }
-            change = &change[..len];
+            change = &change[len..];
             for p in s_pid + 1..e_pid {
                 let mut slice = self.get_page_mut(p);
                 old.extend(&*slice);
                 slice.copy_from_slice(&change[..PAGE_SIZE as usize]);
-                change = &change[..PAGE_SIZE as usize];
+                change = &change[PAGE_SIZE as usize..];
             }
             let slice = &mut self.get_page_mut(e_pid)[..e_off + 1];
             old.extend(&*slice);
@@ -886,6 +886,7 @@ impl DiskBuffer {
                 }
                 //if slot.updated {
                 if !slot.staging_notifiers.is_empty() {
+                    assert!(slot.writing_notifiers.is_empty());
                     std::mem::swap(&mut slot.writing_notifiers, &mut slot.staging_notifiers);
                     // write again
                     self.schedule_write(page_key);
@@ -1042,9 +1043,11 @@ impl DiskBuffer {
                     .iter_mut()
                     .map(|(_, task)| task.take().unwrap())
                     .collect();
+                println!("begin");
                 for h in handles {
                     h.await.unwrap();
                 }
+                println!("end");
             })
             .await;
     }
