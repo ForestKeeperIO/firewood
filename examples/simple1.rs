@@ -15,6 +15,7 @@ fn main() {
                 .max_revisions(10)
                 .build(),
         );
+    /*
     {
         let db = DB::new("persistent_merkle_simple", &cfg.clone().truncate(true).build()).unwrap();
         let items = vec![
@@ -40,19 +41,21 @@ fn main() {
         wb.commit();
         println!("{}\n{}", hex::encode(&*db.root_hash()), db.dump());
     }
+    */
     {
-        let db = DB::new("persistent_merkle_simple", &cfg.clone().truncate(false).build()).unwrap();
+        let db = DB::new("persistent_merkle_simple", &cfg.clone().truncate(true).build()).unwrap();
         println!("{}\n{}", hex::encode(&*db.root_hash()), db.dump());
         use rand::{Rng, SeedableRng};
         let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         for _ in 0..30 {
             let mut wb = db.new_writebatch();
-            for _ in 0..10 {
+            for _ in 0..100 {
                 let key = "a".repeat(rng.gen_range(1..100));
                 let val = "b".repeat(rng.gen_range(1..32));
                 wb.insert(key.as_bytes(), val.into()).unwrap();
             }
             wb.commit();
+            println!("commit");
         }
         println!("{}\n{}", hex::encode(&*db.root_hash()), db.dump());
     }

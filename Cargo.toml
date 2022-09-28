@@ -23,6 +23,7 @@ futures = "0.3.24"
 
 
 [dev-dependencies]
+clap = { version = "4.0.2", features = ["cargo"] }
 keccak-hasher = "0.15.3"
 rand = "0.8.5"
 triehash = "0.8.4"

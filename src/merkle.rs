@@ -602,8 +602,10 @@ impl<S: ShaleStore> Merkle<S> {
             }
             None => {
                 if rem_path.len() == n_path.len() {
-                    u_ref
-                        .write(|u| {
+                    write_node!(
+                        self,
+                        u_ref,
+                        |u| {
                             match &mut u.inner {
                                 NodeType::Leaf(u) => u.1 = Data(val),
                                 NodeType::Extension(u) => {
@@ -618,8 +620,10 @@ impl<S: ShaleStore> Merkle<S> {
                                 _ => unreachable!(),
                             }
                             u.root_hash = u.inner.hash(&self.store);
-                        })
-                        .unwrap();
+                        },
+                        parents,
+                        deleted
+                    );
                     return Ok(None)
                 }
                 let (leaf_ptr, prefix, idx, v) = if rem_path.len() < n_path.len() {

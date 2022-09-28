@@ -1,5 +1,5 @@
 use std::cell::{RefCell, RefMut};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::fmt;
 use std::num::NonZeroUsize;
 use std::rc::Rc;
@@ -793,6 +793,8 @@ pub struct DiskBufferConfig {
     wal_block_nbit: u64,
     #[builder(default = 100)] // preserve 100 past commits
     max_revisions: u32,
+    #[builder(default = 4096)]
+    max_wal_batch: usize,
 }
 
 struct PendingPage {
@@ -815,8 +817,6 @@ pub struct DiskBuffer {
     task_id: u64,
     tasks: Rc<RefCell<HashMap<u64, Option<tokio::task::JoinHandle<()>>>>>,
     wal: Option<Rc<RefCell<WALWriter<WALStoreAIO>>>>,
-    wal_pending_queue: VecDeque<(Vec<BufferWrite>, AshRecord)>,
-    wal_done_queue: VecDeque<Vec<BufferWrite>>,
     cfg: DiskBufferConfig,
 }
 
@@ -846,8 +846,6 @@ impl DiskBuffer {
             task_id: 0,
             tasks: Rc::new(RefCell::new(HashMap::new())),
             wal: None,
-            wal_pending_queue: VecDeque::new(),
-            wal_done_queue: VecDeque::new(),
         })
     }
 
@@ -946,8 +944,78 @@ impl DiskBuffer {
         Ok(())
     }
 
-    async fn process(&mut self, req: BufferCmd) -> bool {
+    async fn run_wal_queue(&mut self, mut writes: mpsc::Receiver<(Vec<BufferWrite>, AshRecord)>) {
         use std::collections::hash_map::Entry::*;
+        loop {
+            let mut bwrites = Vec::new();
+            let mut records = Vec::new();
+
+            if let Some((bw, ac)) = writes.recv().await {
+                records.push(ac);
+                bwrites.extend(bw);
+            } else {
+                break
+            }
+            while let Ok((bw, ac)) = writes.try_recv() {
+                records.push(ac);
+                bwrites.extend(bw);
+                if records.len() >= self.cfg.max_wal_batch {
+                    break
+                }
+            }
+            // first write to WAL
+            let ring_ids: Vec<_> = futures::future::join_all(self.wal.as_mut().unwrap().borrow_mut().grow(records))
+                .await
+                .into_iter()
+                .map(|ring| ring.map_err(|_| "WAL Error while writing").unwrap().1)
+                .collect();
+            let sem = Rc::new(tokio::sync::Semaphore::new(0));
+            let mut npermit = 0;
+            for BufferWrite { space_id, delta } in bwrites {
+                for w in delta.0 {
+                    let page_key = (space_id, w.0);
+                    match self.pending.entry(page_key) {
+                        Occupied(mut e) => {
+                            let e = e.get_mut();
+                            e.staging_data = w.1.into();
+                            e.staging_notifiers.push(sem.clone());
+                            npermit += 1;
+                            //e.updated = true;
+                        }
+                        Vacant(e) => {
+                            let file_nbit = self.file_pools[page_key.0 as usize].as_ref().unwrap().file_nbit;
+                            e.insert(PendingPage {
+                                staging_data: w.1.into(),
+                                file_nbit,
+                                //updated: false,
+                                staging_notifiers: Vec::new(),
+                                writing_notifiers: vec![sem.clone()],
+                            });
+                            npermit += 1;
+                            self.schedule_write(page_key);
+                        }
+                    }
+                }
+            }
+            let wal = self.wal.as_ref().unwrap().clone();
+            let max_revisions = self.cfg.max_revisions;
+            self.start_task(async move {
+                let _ = sem.acquire_many(npermit).await.unwrap();
+                wal.borrow_mut()
+                    .peel(ring_ids, max_revisions)
+                    .await
+                    .map_err(|_| "WAL errore while pruning")
+                    .unwrap();
+            });
+            if self.pending.len() >= self.cfg.max_pending {
+                let (tx, rx) = oneshot::channel();
+                self.fc_notifier = Some(tx);
+                self.fc_blocker = Some(rx);
+            }
+        }
+    }
+
+    async fn process(&mut self, req: BufferCmd, wal_in: &mpsc::Sender<(Vec<BufferWrite>, AshRecord)>) -> bool {
         match req {
             BufferCmd::Shutdown => return false,
             BufferCmd::InitWAL(rootfd, waldir) => {
@@ -959,57 +1027,7 @@ impl DiskBuffer {
                 .send(self.pending.get(&page_key).map(|e| e.staging_data.clone()))
                 .unwrap(),
             BufferCmd::WriteBatch(writes, wal_writes) => {
-                // first write to WAL
-                let ring_ids: Vec<_> =
-                    futures::future::join_all(self.wal.as_mut().unwrap().borrow_mut().grow(vec![wal_writes]))
-                        .await
-                        .into_iter()
-                        .map(|ring| ring.map_err(|_| "WAL Error while writing").unwrap().1)
-                        .collect();
-                println!("done");
-                let sem = Rc::new(tokio::sync::Semaphore::new(0));
-                let mut npermit = 0;
-                for BufferWrite { space_id, delta } in writes {
-                    for w in delta.0 {
-                        let page_key = (space_id, w.0);
-                        match self.pending.entry(page_key) {
-                            Occupied(mut e) => {
-                                let e = e.get_mut();
-                                e.staging_data = w.1.into();
-                                e.staging_notifiers.push(sem.clone());
-                                npermit += 1;
-                                //e.updated = true;
-                            }
-                            Vacant(e) => {
-                                let file_nbit = self.file_pools[page_key.0 as usize].as_ref().unwrap().file_nbit;
-                                e.insert(PendingPage {
-                                    staging_data: w.1.into(),
-                                    file_nbit,
-                                    //updated: false,
-                                    staging_notifiers: Vec::new(),
-                                    writing_notifiers: vec![sem.clone()],
-                                });
-                                npermit += 1;
-                                self.schedule_write(page_key);
-                            }
-                        }
-                    }
-                }
-                let wal = self.wal.as_ref().unwrap().clone();
-                let max_revisions = self.cfg.max_revisions;
-                self.start_task(async move {
-                    let _ = sem.acquire_many(npermit).await.unwrap();
-                    wal.borrow_mut()
-                        .peel(ring_ids, max_revisions)
-                        .await
-                        .map_err(|_| "WAL errore while pruning")
-                        .unwrap();
-                });
-                if self.pending.len() >= self.cfg.max_pending {
-                    let (tx, rx) = oneshot::channel();
-                    self.fc_notifier = Some(tx);
-                    self.fc_blocker = Some(rx);
-                }
+                wal_in.send((writes, wal_writes)).await.unwrap();
             }
         }
         true
@@ -1031,6 +1049,12 @@ impl DiskBuffer {
     #[tokio::main(flavor = "current_thread")]
     pub async fn run(mut self) {
         std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+        let wal_in = {
+            let (tx, rx) = mpsc::channel(1000);
+            let s = unsafe { self.get_longlive_self() };
+            self.start_task(s.run_wal_queue(rx));
+            tx
+        };
         self.local_pool
             .clone()
             .run_until(async {
@@ -1040,10 +1064,11 @@ impl DiskBuffer {
                         fc.await.unwrap();
                     }
                     let req = self.inbound.recv().await.unwrap();
-                    if !self.process(req).await {
+                    if !self.process(req, &wal_in).await {
                         break
                     }
                 }
+                drop(wal_in);
                 let handles: Vec<_> = self
                     .tasks
                     .borrow_mut()
