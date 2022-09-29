@@ -207,6 +207,13 @@ impl DB {
     }
 }
 
+impl Drop for DB {
+    fn drop(&mut self) {
+        let inner = self.0.lock();
+        println!("{} {}", inner.staging_meta.get_counter(), inner.staging_payload.get_counter());
+    }
+}
+
 pub struct WriteBatch<'a> {
     m: MutexGuard<'a, DBInner>,
 }

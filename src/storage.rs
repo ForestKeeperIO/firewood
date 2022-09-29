@@ -343,6 +343,7 @@ struct StoreRevMutDelta {
 pub struct StoreRevMut {
     prev: Rc<dyn MemStoreR>,
     deltas: Rc<RefCell<StoreRevMutDelta>>,
+    get_counter: std::cell::Cell<usize>,
 }
 
 impl StoreRevMut {
@@ -354,7 +355,12 @@ impl StoreRevMut {
                 pages: HashMap::new(),
                 plain: Ash::new(space_id),
             })),
+            get_counter: std::cell::Cell::new(0),
         }
+    }
+
+    pub fn get_counter(&self) -> usize {
+        self.get_counter.get()
     }
 
     fn get_page_mut(&self, pid: u64) -> RefMut<[u8]> {
@@ -435,6 +441,7 @@ impl MemStore for StoreRevMut {
             }
         };
         let store = self.clone();
+        self.get_counter.set(self.get_counter.get() + 1);
         Some(Box::new(StoreRef { data, store }))
     }
 

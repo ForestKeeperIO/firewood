@@ -47,11 +47,21 @@ fn main() {
         println!("{}\n{}", hex::encode(&*db.root_hash()), db.dump());
         use rand::{Rng, SeedableRng};
         let mut rng = rand::rngs::StdRng::seed_from_u64(0);
+        let mut workload = Vec::new();
         for _ in 0..30 {
-            let mut wb = db.new_writebatch();
+            let mut wb = Vec::new();
             for _ in 0..100 {
                 let key = "a".repeat(rng.gen_range(1..100));
                 let val = "b".repeat(rng.gen_range(1..32));
+                wb.push((key, val))
+            }
+            workload.push(wb);
+        }
+        println!("workload prepared");
+
+        for w in workload {
+            let mut wb = db.new_writebatch();
+            for (key, val) in w {
                 wb.insert(key.as_bytes(), val.into()).unwrap();
             }
             wb.commit();

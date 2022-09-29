@@ -52,7 +52,7 @@ fn merkle_build_test<K: AsRef<[u8]> + std::cmp::Ord + Clone, V: AsRef<[u8]> + Cl
         for (k, v) in items_copy {
             println!("{} => {}", hex::encode(k), hex::encode(v));
         }
-        merkle.dump();
+        println!("{}", merkle.dump());
         panic!();
     }
     merkle
