@@ -15,7 +15,6 @@ fn main() {
                 .max_revisions(10)
                 .build(),
         );
-    /*
     {
         let db = DB::new("persistent_merkle_simple", &cfg.clone().truncate(true).build()).unwrap();
         let items = vec![
@@ -41,7 +40,6 @@ fn main() {
         wb.commit();
         println!("{}\n{}", hex::encode(&*db.root_hash()), db.dump());
     }
-    */
     {
         let db = DB::new("persistent_merkle_simple", &cfg.clone().truncate(true).build()).unwrap();
         println!("{}\n{}", hex::encode(&*db.root_hash()), db.dump());
@@ -51,8 +49,8 @@ fn main() {
         for _ in 0..30 {
             let mut wb = Vec::new();
             for _ in 0..100 {
-                let key = "a".repeat(rng.gen_range(1..100));
-                let val = "b".repeat(rng.gen_range(1..32));
+                let key = rng.gen::<[u8; 32]>();
+                let val = "b".repeat(rng.gen_range(1..100));
                 wb.push((key, val))
             }
             workload.push(wb);
@@ -62,7 +60,7 @@ fn main() {
         for w in workload {
             let mut wb = db.new_writebatch();
             for (key, val) in w {
-                wb.insert(key.as_bytes(), val.into()).unwrap();
+                wb.insert(key, val.into()).unwrap();
             }
             wb.commit();
             println!("commit");

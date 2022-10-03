@@ -1,8 +1,8 @@
 use firewood::merkle::*;
-use shale::{MemStore, MummyItem, ObjPtr};
+use shale::{MemStore, MummyItem, MummyObj, ObjPtr};
 use std::rc::Rc;
 
-fn merkle_setup_test(meta_size: u64, compact_size: u64) -> Merkle<shale::compact::CompactSpace> {
+fn merkle_setup_test(meta_size: u64, compact_size: u64) -> Merkle {
     use shale::{compact::CompactSpaceHeader, PlainMem};
     const RESERVED: u64 = 0x1000;
     assert!(meta_size > RESERVED);
@@ -18,24 +18,22 @@ fn merkle_setup_test(meta_size: u64, compact_size: u64) -> Merkle<shale::compact
     );
     mem_meta.write(merkle_header.addr(), &MerkleHeader::new_empty().dehydrate());
 
-    let compact_header = unsafe {
-        shale::get_obj_ref(mem_meta.as_ref(), compact_header, shale::compact::CompactHeader::MSIZE)
-            .unwrap()
-            .to_longlive()
-    };
-    let merkle_header = unsafe {
-        shale::get_obj_ref(mem_meta.as_ref(), merkle_header, MerkleHeader::MSIZE)
-            .unwrap()
-            .to_longlive()
+    let (compact_header, merkle_header) = unsafe {
+        (
+            MummyObj::ptr_to_obj(mem_meta.as_ref(), compact_header, shale::compact::CompactHeader::MSIZE)
+                .unwrap(),
+            MummyObj::ptr_to_obj(mem_meta.as_ref(), merkle_header, MerkleHeader::MSIZE).unwrap(),
+        )
     };
 
-    let space = shale::compact::CompactSpace::new(mem_meta, mem_payload, compact_header, 10, 16).unwrap();
-    Merkle::new(merkle_header, space)
+    let cache = shale::ObjCache::new(1024);
+    let space = shale::compact::CompactSpace::new(mem_meta, mem_payload, compact_header, cache, 10, 16).unwrap();
+    Merkle::new(merkle_header, Box::new(space))
 }
 
 fn merkle_build_test<K: AsRef<[u8]> + std::cmp::Ord + Clone, V: AsRef<[u8]> + Clone>(
     items: Vec<(K, V)>, meta_size: u64, compact_size: u64,
-) -> Merkle<shale::compact::CompactSpace> {
+) -> Merkle {
     let mut merkle = merkle_setup_test(meta_size, compact_size);
     for (k, v) in items.iter() {
         merkle.insert(k, v.as_ref().to_vec()).unwrap();

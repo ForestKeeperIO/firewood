@@ -7,8 +7,8 @@ use typed_builder::TypedBuilder;
 
 use crate::file;
 use crate::merkle::{Hash, Merkle, MerkleHeader};
-use crate::storage::{CachedSpace, DiskBuffer, MemStoreR, StoreConfig, StoreRevMut};
 pub use crate::storage::DiskBufferConfig;
+use crate::storage::{CachedSpace, DiskBuffer, MemStoreR, StoreConfig, StoreRevMut};
 
 const MERKLE_META_SPACE: SpaceID = 0x0;
 const MERKLE_COMPACT_SPACE: SpaceID = 0x1;
@@ -49,7 +49,7 @@ pub struct DBConfig {
 }
 
 struct DBInner {
-    merkle: Merkle<shale::compact::CompactSpace>,
+    merkle: Merkle,
     disk_requester: crate::storage::DiskBufferRequester,
     disk_thread: Option<JoinHandle<()>>,
     staging_meta: Rc<StoreRevMut>,
@@ -165,24 +165,24 @@ impl DB {
         let ch_ref;
         let mh_ref;
         unsafe {
-            ch_ref = shale::get_obj_ref(staging_meta_ref, compact_header, shale::compact::CompactHeader::MSIZE)
-                .unwrap()
-                .to_longlive();
-            mh_ref = shale::get_obj_ref(staging_meta_ref, merkle_header, MerkleHeader::MSIZE)
-                .unwrap()
-                .to_longlive();
+            use shale::MummyObj;
+            ch_ref =
+                MummyObj::ptr_to_obj(staging_meta_ref, compact_header, shale::compact::CompactHeader::MSIZE).unwrap();
+            mh_ref = MummyObj::ptr_to_obj(staging_meta_ref, merkle_header, MerkleHeader::MSIZE).unwrap();
         }
 
+        let cache = shale::ObjCache::new(4096);
         let space = shale::compact::CompactSpace::new(
             staging_meta.clone(),
             staging_payload.clone(),
             ch_ref,
+            cache,
             cfg.compact_max_walk,
             header.compact_regn_nbit,
         )
         .unwrap();
         disk_requester.init_wal("wal", db_fd);
-        let merkle = Merkle::new(mh_ref, space);
+        let merkle = Merkle::new(mh_ref, Box::new(space));
         Ok(Self(Mutex::new(DBInner {
             merkle,
             disk_thread,
@@ -204,13 +204,6 @@ impl DB {
 
     pub fn dump(&self) -> String {
         self.0.lock().merkle.dump()
-    }
-}
-
-impl Drop for DB {
-    fn drop(&mut self) {
-        let inner = self.0.lock();
-        println!("{} {}", inner.staging_meta.get_counter(), inner.staging_payload.get_counter());
     }
 }
 
@@ -248,7 +241,7 @@ impl<'a> WriteBatch<'a> {
                     delta: meta_pages,
                 },
             ],
-            crate::storage::AshRecord(vec![payload_plain, meta_plain])
+            crate::storage::AshRecord(vec![payload_plain, meta_plain]),
         );
     }
 
