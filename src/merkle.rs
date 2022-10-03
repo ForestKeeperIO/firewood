@@ -25,7 +25,7 @@ impl std::ops::Deref for Hash {
 impl MummyItem for Hash {
     fn hydrate(addr: u64, mem: &dyn MemStore) -> Result<(u64, Self), ShaleError> {
         const SIZE: u64 = 32;
-        let raw = mem.get_ref(addr, SIZE).ok_or(ShaleError::LinearMemStoreError)?;
+        let raw = mem.get_view(addr, SIZE).ok_or(ShaleError::LinearMemStoreError)?;
         Ok((SIZE, Self(raw[..SIZE as usize].try_into().unwrap())))
     }
     fn dehydrate(&self) -> Vec<u8> {
@@ -47,7 +47,7 @@ impl MerkleHeader {
 
 impl MummyItem for MerkleHeader {
     fn hydrate(addr: u64, mem: &dyn MemStore) -> Result<(u64, Self), ShaleError> {
-        let raw = mem.get_ref(addr, Self::MSIZE).ok_or(ShaleError::LinearMemStoreError)?;
+        let raw = mem.get_view(addr, Self::MSIZE).ok_or(ShaleError::LinearMemStoreError)?;
         let root = u64::from_le_bytes(raw[..8].try_into().unwrap());
         unsafe {
             Ok((
@@ -310,7 +310,7 @@ impl MummyItem for Node {
     fn hydrate(addr: u64, mem: &dyn MemStore) -> Result<(u64, Self), ShaleError> {
         let dec_err = |_| ShaleError::DecodeError;
         const META_SIZE: u64 = 32 + 1 + 8;
-        let meta_raw = mem.get_ref(addr, META_SIZE).ok_or(ShaleError::LinearMemStoreError)?;
+        let meta_raw = mem.get_view(addr, META_SIZE).ok_or(ShaleError::LinearMemStoreError)?;
         let root_hash = Hash(meta_raw[0..32].try_into().map_err(dec_err)?);
         let eth_rlp_long = meta_raw[32] == 1;
         let len = u64::from_le_bytes(meta_raw[33..].try_into().map_err(dec_err)?);
@@ -320,7 +320,7 @@ impl MummyItem for Node {
         // values are used in place of hashes to refer to a child node.
 
         let rlp_raw = mem
-            .get_ref(addr + META_SIZE, len)
+            .get_view(addr + META_SIZE, len)
             .ok_or(ShaleError::LinearMemStoreError)?;
         let items: Vec<Vec<u8>> = rlp::decode_list(&rlp_raw);
 

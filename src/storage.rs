@@ -318,7 +318,7 @@ impl<S: Clone + MemStore + 'static> MemView for StoreRef<S> {
 }
 
 impl MemStore for StoreRevShared {
-    fn get_ref(&self, offset: u64, length: u64) -> Option<Box<dyn MemView>> {
+    fn get_view(&self, offset: u64, length: u64) -> Option<Box<dyn MemView>> {
         let store = self.clone();
         let data = self.0.get_slice(offset, length)?;
         Some(Box::new(StoreRef { data, store }))
@@ -401,7 +401,7 @@ impl StoreRevMut {
 }
 
 impl MemStore for StoreRevMut {
-    fn get_ref(&self, offset: u64, length: u64) -> Option<Box<dyn MemView>> {
+    fn get_view(&self, offset: u64, length: u64) -> Option<Box<dyn MemView>> {
         let data = if length == 0 {
             Vec::new()
         } else {
@@ -526,12 +526,12 @@ fn test_apply_change() {
         let z = Rc::new(ZeroStore::new());
         let rev = StoreRevShared::apply_change(z, &writes).unwrap();
         println!("{:?}", rev);
-        assert_eq!(rev.get_ref(min, max - min).unwrap().deref(), &canvas);
+        assert_eq!(rev.get_view(min, max - min).unwrap().deref(), &canvas);
         for _ in 0..2 * n {
             let l = rng.gen_range(min..max);
             let r = rng.gen_range(l + 1..max);
             assert_eq!(
-                rev.get_ref(l, r - l).unwrap().deref(),
+                rev.get_view(l, r - l).unwrap().deref(),
                 &canvas[(l - min) as usize..(r - min) as usize]
             );
         }
