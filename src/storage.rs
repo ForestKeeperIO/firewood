@@ -301,6 +301,7 @@ impl StoreRevShared {
 
 struct StoreRef<S: Clone + MemStore> {
     data: Vec<u8>,
+    offset: u64,
     store: S,
 }
 
@@ -315,13 +316,16 @@ impl<S: Clone + MemStore + 'static> MemView for StoreRef<S> {
     fn mem_image(&self) -> &dyn MemStore {
         &self.store
     }
+    fn get_interval(&self) -> (u64, u64) {
+        (self.offset, self.data.len() as u64)
+    }
 }
 
 impl MemStore for StoreRevShared {
     fn get_view(&self, offset: u64, length: u64) -> Option<Box<dyn MemView>> {
         let store = self.clone();
         let data = self.0.get_slice(offset, length)?;
-        Some(Box::new(StoreRef { data, store }))
+        Some(Box::new(StoreRef { data, offset, store }))
     }
 
     fn write(&self, _offset: u64, _change: &[u8]) {
@@ -435,7 +439,7 @@ impl MemStore for StoreRevMut {
             }
         };
         let store = self.clone();
-        Some(Box::new(StoreRef { data, store }))
+        Some(Box::new(StoreRef { data, offset, store }))
     }
 
     fn write(&self, offset: u64, mut change: &[u8]) {
