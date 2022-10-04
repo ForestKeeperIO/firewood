@@ -390,15 +390,6 @@ impl StoreRevMut {
         RefMut::map(deltas, |e| &mut e.pages.get_mut(&pid).unwrap()[..])
     }
 
-    pub fn to_delta_pages(&self) -> StoreDelta {
-        let mut pages = Vec::new();
-        for (pid, page) in self.deltas.borrow().pages.iter() {
-            pages.push(DeltaPage(*pid, page.clone()));
-        }
-        pages.sort_by_key(|p| p.0);
-        StoreDelta(pages)
-    }
-
     pub fn take_delta(&self) -> (StoreDelta, Ash) {
         let mut pages = Vec::new();
         let deltas = std::mem::replace(

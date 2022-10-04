@@ -222,7 +222,7 @@ impl DB {
     }
 
     pub fn new_writebatch(&self) -> WriteBatch {
-        WriteBatch { m: self.inner.lock() }
+        WriteBatch { m: self.inner.lock(), committed: false }
     }
 
     pub fn root_hash(&self) -> Hash {
@@ -240,7 +240,7 @@ impl DB {
     pub fn get_revision(&self, nback: usize, ncached_objs: Option<usize>) -> Option<Revision> {
         let mut inner = self.inner.lock();
         let rlen = inner.revisions.len();
-        if nback > inner.max_nrev {
+        if nback == 0 || nback > inner.max_nrev {
             return None
         }
         if rlen < nback {
@@ -322,6 +322,7 @@ impl<'a> Revision<'a> {
 
 pub struct WriteBatch<'a> {
     m: MutexGuard<'a, DBInner>,
+    committed: bool,
 }
 
 impl<'a> WriteBatch<'a> {
@@ -333,9 +334,9 @@ impl<'a> WriteBatch<'a> {
         self.m.merkle.remove(key).map_err(DBError::Merkle)
     }
 
-    pub fn commit(self) {
+    pub fn commit(mut self) {
         use crate::storage::BufferWrite;
-        let mut inner = self.m;
+        let inner = &mut *self.m;
         // clear the staging layer and apply changes to the CachedSpace
         let (payload_pages, payload_plain) = inner.staging.payload.take_delta();
         let (meta_pages, meta_plain) = inner.staging.meta.take_delta();
@@ -358,6 +359,8 @@ impl<'a> WriteBatch<'a> {
             inner.revisions.pop_back();
         }
 
+        self.committed = true;
+
         // schedule writes to the disk
         inner.disk_requester.write(
             vec![
@@ -373,10 +376,14 @@ impl<'a> WriteBatch<'a> {
             crate::storage::AshRecord([(MERKLE_COMPACT_SPACE, payload_plain), (MERKLE_META_SPACE, meta_plain)].into()),
         );
     }
+}
 
-    pub fn abort(self) {
-        // drop the staging changes
-        self.m.staging.payload.take_delta();
-        self.m.staging.meta.take_delta();
+impl<'a> Drop for WriteBatch<'a> {
+    fn drop(&mut self) {
+        if !self.committed {
+            // drop the staging changes
+            self.m.staging.payload.take_delta();
+            self.m.staging.meta.take_delta();
+        }
     }
 }
