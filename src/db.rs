@@ -17,6 +17,7 @@ const SPACE_RESERVED: u64 = 0x1000;
 
 #[derive(Debug)]
 pub enum DBError {
+    InvalidParams,
     Merkle(crate::merkle::MerkleError),
     System(nix::Error),
 }
@@ -45,6 +46,8 @@ pub struct DBConfig {
     compact_regn_nbit: u64,
     #[builder(default = false)]
     truncate: bool,
+    #[builder(default = 65536)]
+    merkle_ncached_objs: usize,
     #[builder(default = DiskBufferConfig::builder().build())]
     buffer: DiskBufferConfig,
 }
@@ -80,6 +83,7 @@ impl Drop for DBInner {
 pub struct DB {
     inner: Mutex<DBInner>,
     compact_regn_nbit: u64,
+    merkle_ncached_objs: usize,
 }
 
 impl DB {
@@ -95,9 +99,9 @@ impl DB {
         let fd0 = file0.get_fd();
 
         if reset {
-            // FIXME: return as an error
-            assert!(cfg.compact_file_nbit >= cfg.compact_regn_nbit);
-            assert!(cfg.compact_regn_nbit >= crate::storage::PAGE_SIZE_NBIT);
+            if cfg.compact_file_nbit < cfg.compact_regn_nbit || cfg.compact_regn_nbit < crate::storage::PAGE_SIZE_NBIT {
+                return Err(DBError::InvalidParams)
+            }
             nix::unistd::ftruncate(fd0, 0).map_err(DBError::System)?;
             nix::unistd::ftruncate(fd0, 1 << cfg.meta_file_nbit).map_err(DBError::System)?;
             let magic_str = b"firewood v0.1";
@@ -190,7 +194,7 @@ impl DB {
             )
         };
 
-        let cache = shale::ObjCache::new(4096);
+        let cache = shale::ObjCache::new(cfg.merkle_ncached_objs);
         let space = shale::compact::CompactSpace::new(
             staging.meta.clone(),
             staging.payload.clone(),
@@ -213,6 +217,7 @@ impl DB {
                 max_nrev: cfg.buffer.max_revisions as usize,
             }),
             compact_regn_nbit: header.compact_regn_nbit,
+            merkle_ncached_objs: cfg.merkle_ncached_objs,
         })
     }
 
@@ -232,7 +237,7 @@ impl DB {
         self.inner.lock().merkle.get(key).map_err(DBError::Merkle)
     }
 
-    pub fn get_revision(&self, nback: usize) -> Option<Revision> {
+    pub fn get_revision(&self, nback: usize, ncached_objs: Option<usize>) -> Option<Revision> {
         let mut inner = self.inner.lock();
         let rlen = inner.revisions.len();
         if nback > inner.max_nrev {
@@ -279,8 +284,7 @@ impl DB {
             )
         };
 
-        // FIXME: configurable cache size
-        let cache = shale::ObjCache::new(4096);
+        let cache = shale::ObjCache::new(ncached_objs.unwrap_or(self.merkle_ncached_objs));
         let space = shale::compact::CompactSpace::new(
             Rc::new(space.meta.clone()),
             Rc::new(space.payload.clone()),
@@ -339,6 +343,7 @@ impl<'a> WriteBatch<'a> {
         let old_meta_delta = inner.cached.meta.update(&meta_pages).unwrap();
         let old_payload_delta = inner.cached.payload.update(&payload_pages).unwrap();
 
+        // update the rolling window of past revisions
         let new_base = MerkleSpace::new(
             StoreRevShared::from_delta(inner.cached.meta.clone(), old_meta_delta),
             StoreRevShared::from_delta(inner.cached.payload.clone(), old_payload_delta),
@@ -353,6 +358,7 @@ impl<'a> WriteBatch<'a> {
             inner.revisions.pop_back();
         }
 
+        // schedule writes to the disk
         inner.disk_requester.write(
             vec![
                 BufferWrite {

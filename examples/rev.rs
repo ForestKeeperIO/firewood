@@ -24,15 +24,18 @@ fn main() {
             println!("{}", hex::encode(&*db.root_hash()));
         }
         println!("{}", db.dump());
-        println!("{}", hex::encode(&*db.get_revision(1).unwrap().root_hash()));
-        println!("{}", hex::encode(&*db.get_revision(2).unwrap().root_hash()));
+        println!("{}", hex::encode(&*db.get_revision(1, None).unwrap().root_hash()));
+        println!("{}", hex::encode(&*db.get_revision(2, None).unwrap().root_hash()));
     }
     {
         let db = DB::new("rev_db", &cfg.clone().truncate(false).build()).unwrap();
         {
-            let rev = db.get_revision(1).unwrap();
+            let rev = db.get_revision(1, None).unwrap();
             println!("{}\n{}", hex::encode(&*rev.root_hash()), rev.dump());
         }
-        println!("{}", hex::encode(&*db.get_revision(2).unwrap().root_hash()));
+        {
+            let rev = db.get_revision(2, None).unwrap();
+            println!("{}\n{}", hex::encode(&*rev.root_hash()), rev.dump());
+        }
     }
 }

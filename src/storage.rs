@@ -1,3 +1,5 @@
+// TODO: try to get rid of the use `RefCell` in this file
+
 use std::cell::{RefCell, RefMut};
 use std::collections::HashMap;
 use std::fmt;
@@ -796,6 +798,8 @@ enum BufferCmd {
 pub struct DiskBufferConfig {
     #[builder(default = 4096)]
     max_buffered: usize,
+    #[builder(default = 1024)]
+    max_wal_buffered: usize,
     #[builder(default = 4096)]
     max_pending: usize,
     #[builder(default = 128)]
@@ -1084,7 +1088,7 @@ impl DiskBuffer {
     pub async fn run(mut self) {
         std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
         let wal_in = {
-            let (tx, rx) = mpsc::channel(1000);
+            let (tx, rx) = mpsc::channel(self.cfg.max_wal_buffered);
             let s = unsafe { self.get_longlive_self() };
             self.start_task(s.run_wal_queue(rx));
             tx
