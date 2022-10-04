@@ -12,7 +12,7 @@ use growthring::{
 };
 use nix::fcntl::{flock, FlockArg};
 use shale::{MemStore, MemView, SpaceID};
-use tokio::sync::{mpsc, oneshot, Semaphore};
+use tokio::sync::{mpsc, oneshot, Mutex, Semaphore};
 use typed_builder::TypedBuilder;
 
 use crate::file::{Fd, File};
@@ -36,15 +36,13 @@ pub struct SpaceWrite {
 
 #[derive(Debug)]
 pub struct Ash {
-    space_id: SpaceID,
-    old: Vec<SpaceWrite>,
-    new: Vec<Box<[u8]>>,
+    pub old: Vec<SpaceWrite>,
+    pub new: Vec<Box<[u8]>>,
 }
 
 impl Ash {
-    fn new(space_id: SpaceID) -> Self {
+    fn new() -> Self {
         Self {
-            space_id,
             old: Vec::new(),
             new: Vec::new(),
         }
@@ -52,14 +50,14 @@ impl Ash {
 }
 
 #[derive(Debug)]
-pub struct AshRecord(pub Vec<Ash>);
+pub struct AshRecord(pub HashMap<SpaceID, Ash>);
 
 impl growthring::wal::Record for AshRecord {
     fn serialize(&self) -> growthring::wal::WALBytes {
         let mut bytes = Vec::new();
         bytes.extend((self.0.len() as u64).to_le_bytes());
-        for w in self.0.iter() {
-            bytes.extend((w.space_id as u8).to_le_bytes());
+        for (space_id, w) in self.0.iter() {
+            bytes.extend((*space_id as u8).to_le_bytes());
             bytes.extend((w.old.len() as u32).to_le_bytes());
             for (sw_old, sw_new) in w.old.iter().zip(w.new.iter()) {
                 bytes.extend(sw_old.offset.to_le_bytes());
@@ -98,7 +96,7 @@ impl AshRecord {
                     old.push(old_write);
                     new.push(new_data);
                 }
-                Ash { space_id, old, new }
+                (space_id, Ash { old, new })
             })
             .collect();
         Self(writes)
@@ -218,15 +216,15 @@ impl StoreDelta {
     }
 }
 
-struct StoreRev {
-    prev: Rc<dyn MemStoreR>,
-    deltas: StoreDelta,
+pub struct StoreRev {
+    prev: RefCell<Rc<dyn MemStoreR>>,
+    delta: StoreDelta,
 }
 
 impl fmt::Debug for StoreRev {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "<StoreRev")?;
-        for d in self.deltas.iter() {
+        for d in self.delta.iter() {
             write!(f, " 0x{:x}", d.0)?;
         }
         write!(f, ">\n")
@@ -235,57 +233,58 @@ impl fmt::Debug for StoreRev {
 
 impl MemStoreR for StoreRev {
     fn get_slice(&self, offset: u64, length: u64) -> Option<Vec<u8>> {
+        let prev = self.prev.borrow();
         let mut start = offset;
         let end = start + length;
-        let deltas = &self.deltas;
+        let delta = &self.delta;
         let mut l = 0;
-        let mut r = deltas.len();
+        let mut r = delta.len();
         // no dirty page, before or after all dirty pages
         if r == 0 {
-            return self.prev.get_slice(start, end - start)
+            return prev.get_slice(start, end - start)
         }
         // otherwise, some dirty pages are covered by the range
         while r - l > 1 {
             let mid = (l + r) >> 1;
-            (*if start < deltas[mid].offset() { &mut r } else { &mut l }) = mid;
+            (*if start < delta[mid].offset() { &mut r } else { &mut l }) = mid;
         }
-        if start >= deltas[l].offset() + PAGE_SIZE {
+        if start >= delta[l].offset() + PAGE_SIZE {
             l += 1
         }
-        if l >= deltas.len() || end < deltas[l].offset() {
-            return self.prev.get_slice(start, end - start)
+        if l >= delta.len() || end < delta[l].offset() {
+            return prev.get_slice(start, end - start)
         }
         let mut data = Vec::new();
-        let p_off = std::cmp::min(end - deltas[l].offset(), PAGE_SIZE);
-        if start < deltas[l].offset() {
-            data.extend(self.prev.get_slice(start, deltas[l].offset() - start)?);
-            data.extend(&deltas[l].data()[..p_off as usize]);
+        let p_off = std::cmp::min(end - delta[l].offset(), PAGE_SIZE);
+        if start < delta[l].offset() {
+            data.extend(prev.get_slice(start, delta[l].offset() - start)?);
+            data.extend(&delta[l].data()[..p_off as usize]);
         } else {
-            data.extend(&deltas[l].data()[(start - deltas[l].offset()) as usize..p_off as usize]);
+            data.extend(&delta[l].data()[(start - delta[l].offset()) as usize..p_off as usize]);
         };
-        start = deltas[l].offset() + p_off;
+        start = delta[l].offset() + p_off;
         while start < end {
             l += 1;
-            if l >= deltas.len() || end < deltas[l].offset() {
-                data.extend(self.prev.get_slice(start, end - start)?);
+            if l >= delta.len() || end < delta[l].offset() {
+                data.extend(prev.get_slice(start, end - start)?);
                 break
             }
-            if deltas[l].offset() > start {
-                data.extend(self.prev.get_slice(start, deltas[l].offset() - start)?);
+            if delta[l].offset() > start {
+                data.extend(prev.get_slice(start, delta[l].offset() - start)?);
             }
-            if end < deltas[l].offset() + PAGE_SIZE {
-                data.extend(&deltas[l].data()[..(end - deltas[l].offset()) as usize]);
+            if end < delta[l].offset() + PAGE_SIZE {
+                data.extend(&delta[l].data()[..(end - delta[l].offset()) as usize]);
                 break
             }
-            data.extend(deltas[l].data());
-            start = deltas[l].offset() + PAGE_SIZE;
+            data.extend(delta[l].data());
+            start = delta[l].offset() + PAGE_SIZE;
         }
         assert!(data.len() == length as usize);
         Some(data)
     }
 
     fn id(&self) -> SpaceID {
-        self.prev.id()
+        self.prev.borrow().id()
     }
 }
 
@@ -293,9 +292,40 @@ impl MemStoreR for StoreRev {
 pub struct StoreRevShared(Rc<StoreRev>);
 
 impl StoreRevShared {
-    pub fn apply_change(prev: Rc<dyn MemStoreR>, writes: &[SpaceWrite]) -> Option<StoreRevShared> {
-        let deltas = StoreDelta::new(prev.as_ref(), writes)?;
-        Some(Self(Rc::new(StoreRev { prev, deltas })))
+    pub fn from_ash(prev: Rc<dyn MemStoreR>, writes: &[SpaceWrite]) -> Option<Self> {
+        let delta = StoreDelta::new(prev.as_ref(), writes)?;
+        let prev = RefCell::new(prev);
+        Some(Self(Rc::new(StoreRev { prev, delta })))
+    }
+
+    pub fn from_delta(prev: Rc<dyn MemStoreR>, delta: StoreDelta) -> Self {
+        let prev = RefCell::new(prev);
+        Self(Rc::new(StoreRev { prev, delta }))
+    }
+
+    pub fn set_prev(&mut self, prev: Rc<dyn MemStoreR>) {
+        *self.0.prev.borrow_mut() = prev
+    }
+
+    pub fn inner(&self) -> &Rc<StoreRev> {
+        &self.0
+    }
+}
+
+impl MemStore for StoreRevShared {
+    fn get_view(&self, offset: u64, length: u64) -> Option<Box<dyn MemView>> {
+        let store = self.clone();
+        let data = self.0.get_slice(offset, length)?;
+        Some(Box::new(StoreRef { data, offset, store }))
+    }
+
+    fn write(&self, _offset: u64, _change: &[u8]) {
+        // StoreRevShared is a read-only view version of MemStore
+        unimplemented!()
+    }
+
+    fn id(&self) -> SpaceID {
+        <StoreRev as MemStoreR>::id(&self.0)
     }
 }
 
@@ -321,23 +351,6 @@ impl<S: Clone + MemStore + 'static> MemView for StoreRef<S> {
     }
 }
 
-impl MemStore for StoreRevShared {
-    fn get_view(&self, offset: u64, length: u64) -> Option<Box<dyn MemView>> {
-        let store = self.clone();
-        let data = self.0.get_slice(offset, length)?;
-        Some(Box::new(StoreRef { data, offset, store }))
-    }
-
-    fn write(&self, _offset: u64, _change: &[u8]) {
-        // StoreRevShared is a read-only view version of MemStore
-        unimplemented!()
-    }
-
-    fn id(&self) -> SpaceID {
-        <StoreRev as MemStoreR>::id(&self.0)
-    }
-}
-
 struct StoreRevMutDelta {
     pages: HashMap<u64, Box<Page>>,
     plain: Ash,
@@ -351,12 +364,11 @@ pub struct StoreRevMut {
 
 impl StoreRevMut {
     pub fn new(prev: Rc<dyn MemStoreR>) -> Self {
-        let space_id = prev.id();
         Self {
             prev,
             deltas: Rc::new(RefCell::new(StoreRevMutDelta {
                 pages: HashMap::new(),
-                plain: Ash::new(space_id),
+                plain: Ash::new(),
             })),
         }
     }
@@ -381,6 +393,7 @@ impl StoreRevMut {
         for (pid, page) in self.deltas.borrow().pages.iter() {
             pages.push(DeltaPage(*pid, page.clone()));
         }
+        pages.sort_by_key(|p| p.0);
         StoreDelta(pages)
     }
 
@@ -390,12 +403,13 @@ impl StoreRevMut {
             &mut *self.deltas.borrow_mut(),
             StoreRevMutDelta {
                 pages: HashMap::new(),
-                plain: Ash::new(self.id()),
+                plain: Ash::new(),
             },
         );
         for (pid, page) in deltas.pages.into_iter() {
             pages.push(DeltaPage(pid, page));
         }
+        pages.sort_by_key(|p| p.0);
         (StoreDelta(pages), deltas.plain)
     }
 
@@ -507,7 +521,7 @@ impl MemStoreR for ZeroStore {
 }
 
 #[test]
-fn test_apply_change() {
+fn test_from_ash() {
     use rand::{rngs::StdRng, Rng, SeedableRng};
     let mut rng = StdRng::seed_from_u64(42);
     let min = rng.gen_range(0..2 * PAGE_SIZE);
@@ -528,7 +542,7 @@ fn test_apply_change() {
             writes.push(SpaceWrite { offset: l, data });
         }
         let z = Rc::new(ZeroStore::new());
-        let rev = StoreRevShared::apply_change(z, &writes).unwrap();
+        let rev = StoreRevShared::from_ash(z, &writes).unwrap();
         println!("{:?}", rev);
         assert_eq!(rev.get_view(min, max - min).unwrap().deref(), &canvas);
         for _ in 0..2 * n {
@@ -772,8 +786,9 @@ pub struct BufferWrite {
 #[derive(Debug)]
 enum BufferCmd {
     InitWAL(Fd, String),
-    GetPage((SpaceID, u64), oneshot::Sender<Option<Arc<Page>>>),
     WriteBatch(Vec<BufferWrite>, AshRecord),
+    GetPage((SpaceID, u64), oneshot::Sender<Option<Arc<Page>>>),
+    CollectAsh(usize, oneshot::Sender<Vec<AshRecord>>),
     Shutdown,
 }
 
@@ -796,7 +811,7 @@ pub struct DiskBufferConfig {
     #[builder(default = 15)] // 32KB
     wal_block_nbit: u64,
     #[builder(default = 100)] // preserve 100 past commits
-    max_revisions: u32,
+    pub(crate) max_revisions: u32,
     #[builder(default = 4096)]
     max_wal_batch: usize,
 }
@@ -804,7 +819,6 @@ pub struct DiskBufferConfig {
 struct PendingPage {
     staging_data: Arc<Page>,
     file_nbit: u64,
-    //updated: bool,
     staging_notifiers: Vec<Rc<Semaphore>>,
     writing_notifiers: Vec<Rc<Semaphore>>,
 }
@@ -820,7 +834,7 @@ pub struct DiskBuffer {
     local_pool: Rc<tokio::task::LocalSet>,
     task_id: u64,
     tasks: Rc<RefCell<HashMap<u64, Option<tokio::task::JoinHandle<()>>>>>,
-    wal: Option<Rc<RefCell<WALWriter<WALStoreAIO>>>>,
+    wal: Option<Rc<Mutex<WALWriter<WALStoreAIO>>>>,
     cfg: DiskBufferConfig,
 }
 
@@ -924,7 +938,7 @@ impl DiskBuffer {
                 store,
                 |raw, _| {
                     let batch = AshRecord::deserialize(raw);
-                    for Ash { space_id, old, new } in batch.0 {
+                    for (space_id, Ash { old, new }) in batch.0 {
                         for (old, data) in old.into_iter().zip(new.into_iter()) {
                             let offset = old.offset;
                             let file_pool = self.file_pools[space_id as usize].as_ref().unwrap();
@@ -944,7 +958,7 @@ impl DiskBuffer {
                 self.cfg.max_revisions,
             )
             .await?;
-        self.wal = Some(Rc::new(RefCell::new(wal)));
+        self.wal = Some(Rc::new(Mutex::new(wal)));
         Ok(())
     }
 
@@ -968,7 +982,7 @@ impl DiskBuffer {
                 }
             }
             // first write to WAL
-            let ring_ids: Vec<_> = futures::future::join_all(self.wal.as_mut().unwrap().borrow_mut().grow(records))
+            let ring_ids: Vec<_> = futures::future::join_all(self.wal.as_ref().unwrap().lock().await.grow(records))
                 .await
                 .into_iter()
                 .map(|ring| ring.map_err(|_| "WAL Error while writing").unwrap().1)
@@ -984,14 +998,12 @@ impl DiskBuffer {
                             e.staging_data = w.1.into();
                             e.staging_notifiers.push(sem.clone());
                             npermit += 1;
-                            //e.updated = true;
                         }
                         Vacant(e) => {
                             let file_nbit = self.file_pools[page_key.0 as usize].as_ref().unwrap().file_nbit;
                             e.insert(PendingPage {
                                 staging_data: w.1.into(),
                                 file_nbit,
-                                //updated: false,
                                 staging_notifiers: Vec::new(),
                                 writing_notifiers: vec![sem.clone()],
                             });
@@ -1005,7 +1017,8 @@ impl DiskBuffer {
             let max_revisions = self.cfg.max_revisions;
             self.start_task(async move {
                 let _ = sem.acquire_many(npermit).await.unwrap();
-                wal.borrow_mut()
+                wal.lock()
+                    .await
                     .peel(ring_ids, max_revisions)
                     .await
                     .map_err(|_| "WAL errore while pruning")
@@ -1032,6 +1045,23 @@ impl DiskBuffer {
                 .unwrap(),
             BufferCmd::WriteBatch(writes, wal_writes) => {
                 wal_in.send((writes, wal_writes)).await.unwrap();
+            }
+            BufferCmd::CollectAsh(nrecords, tx) => {
+                // wait to ensure writes are paused for WAL
+                let ash = self
+                    .wal
+                    .as_ref()
+                    .unwrap()
+                    .clone()
+                    .lock()
+                    .await
+                    .read_recent_records(nrecords, &RecoverPolicy::Strict)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(AshRecord::deserialize)
+                    .collect();
+                tx.send(ash).unwrap();
             }
         }
         true
@@ -1133,6 +1163,14 @@ impl DiskBufferRequester {
         self.sender
             .blocking_send(BufferCmd::InitWAL(rootfd, waldir.to_string()))
             .unwrap()
+    }
+
+    pub fn collect_ash(&self, nrecords: usize) -> Vec<AshRecord> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.sender
+            .blocking_send(BufferCmd::CollectAsh(nrecords, resp_tx))
+            .unwrap();
+        resp_rx.blocking_recv().unwrap()
     }
 }
 

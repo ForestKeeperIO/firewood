@@ -6,15 +6,7 @@ fn main() {
         .meta_ncached_files(128)
         .compact_ncached_pages(1024)
         .compact_ncached_files(128)
-        .buffer(
-            DiskBufferConfig::builder()
-            /*
-                .wal_file_nbit(15)
-                .wal_block_nbit(10)
-            */
-                .max_revisions(10)
-                .build(),
-        );
+        .buffer(DiskBufferConfig::builder().max_revisions(10).build());
     {
         let db = DB::new("persistent_merkle_simple", &cfg.clone().truncate(true).build()).unwrap();
         let items = vec![

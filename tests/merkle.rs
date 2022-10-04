@@ -28,7 +28,7 @@ fn merkle_setup_test(meta_size: u64, compact_size: u64) -> Merkle {
 
     let cache = shale::ObjCache::new(1024);
     let space = shale::compact::CompactSpace::new(mem_meta, mem_payload, compact_header, cache, 10, 16).unwrap();
-    Merkle::new(merkle_header, Box::new(space))
+    Merkle::new(merkle_header, Box::new(space), false).unwrap()
 }
 
 fn merkle_build_test<K: AsRef<[u8]> + std::cmp::Ord + Clone, V: AsRef<[u8]> + Clone>(

@@ -10,6 +10,7 @@ const NBRANCH: usize = 16;
 #[derive(Debug)]
 pub enum MerkleError {
     Shale(ShaleError),
+    KeyNotFound,
 }
 
 #[derive(PartialEq, Eq, Clone)]
@@ -481,9 +482,12 @@ impl Merkle {
 }
 
 impl Merkle {
-    pub fn new(mut header: shale::Obj<MerkleHeader>, store: Box<dyn ShaleStore<Node>>) -> Self {
+    pub fn new(mut header: shale::Obj<MerkleHeader>, store: Box<dyn ShaleStore<Node>>, read_only: bool) -> Option<Self> {
         // FIXME move out the store ownership and use configurable parameter
         if header.root.is_null() {
+            if read_only {
+                return None
+            }
             // create the sentinel node
             header
                 .write(|r| {
@@ -503,7 +507,7 @@ impl Merkle {
                 })
                 .unwrap();
         }
-        Self { header, store }
+        Some(Self { header, store })
     }
 
     fn empty_root() -> &'static Hash {
@@ -1254,6 +1258,64 @@ impl Merkle {
             self.store.free_item(ptr).map_err(MerkleError::Shale)?;
         }
         Ok(found)
+    }
+
+    pub fn get(&self, key: &[u8]) -> Result<Vec<u8>, MerkleError> {
+        let root = self.header.root;
+        let mut chunks = vec![0];
+        chunks.extend(to_nibbles(key.as_ref()));
+
+        if root.is_null() {
+            return Err(MerkleError::KeyNotFound)
+        }
+
+        let mut u_ref = self.get_node(root)?;
+        let mut nskip = 0;
+
+        for (i, nib) in chunks.iter().enumerate() {
+            if nskip > 0 {
+                nskip -= 1;
+                continue
+            }
+            let next_ptr = match &u_ref.inner {
+                NodeType::Branch(n) => match n.chd[*nib as usize] {
+                    Some(c) => c,
+                    None => return Err(MerkleError::KeyNotFound),
+                },
+                NodeType::Leaf(n) => {
+                    if &chunks[i..] != &*n.0 {
+                        return Err(MerkleError::KeyNotFound)
+                    }
+                    return Ok(n.1.to_vec())
+                }
+                NodeType::Extension(n) => {
+                    let n_path = &*n.0;
+                    let rem_path = &chunks[i..];
+                    if rem_path < n_path || &rem_path[..n_path.len()] != n_path {
+                        return Err(MerkleError::KeyNotFound)
+                    }
+                    nskip = n_path.len() - 1;
+                    n.1
+                }
+            };
+            u_ref = self.get_node(next_ptr)?;
+        }
+
+        match &u_ref.inner {
+            NodeType::Branch(n) => {
+                if let Some(v) = n.value.as_ref() {
+                    return Ok(v.to_vec())
+                }
+            }
+            NodeType::Leaf(n) => {
+                if n.0.len() == 0 {
+                    return Ok(n.1.to_vec())
+                }
+            }
+            _ => (),
+        }
+
+        Err(MerkleError::KeyNotFound)
     }
 }
 
