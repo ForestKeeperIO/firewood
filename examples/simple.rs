@@ -1,4 +1,4 @@
-use firewood::db::{DBConfig, DiskBufferConfig, DB};
+use firewood::db::{DBConfig, WALConfig, DB};
 
 fn main() {
     let cfg = DBConfig::builder()
@@ -6,9 +6,9 @@ fn main() {
         .meta_ncached_files(128)
         .compact_ncached_pages(1024)
         .compact_ncached_files(128)
-        .buffer(DiskBufferConfig::builder().max_revisions(10).build());
+        .wal(WALConfig::builder().max_revisions(10).build());
     {
-        let db = DB::new("persistent_merkle_simple", &cfg.clone().truncate(true).build()).unwrap();
+        let db = DB::new("simple_db", &cfg.clone().truncate(true).build()).unwrap();
         let items = vec![
             ("do", "verb"),
             ("doe", "reindeer"),
@@ -25,7 +25,7 @@ fn main() {
         println!("{}\n{}", hex::encode(&*db.root_hash()), db.dump());
     }
     {
-        let db = DB::new("persistent_merkle_simple", &cfg.clone().truncate(false).build()).unwrap();
+        let db = DB::new("simple_db", &cfg.clone().truncate(false).build()).unwrap();
         println!("{}\n{}", hex::encode(&*db.root_hash()), db.dump());
         let mut wb = db.new_writebatch();
         wb.insert(b"dough", b"sweet".to_vec()).unwrap();
@@ -33,7 +33,7 @@ fn main() {
         println!("{}\n{}", hex::encode(&*db.root_hash()), db.dump());
     }
     {
-        let db = DB::new("persistent_merkle_simple", &cfg.clone().truncate(true).build()).unwrap();
+        let db = DB::new("simple_db", &cfg.clone().truncate(true).build()).unwrap();
         println!("{}\n{}", hex::encode(&*db.root_hash()), db.dump());
         use rand::{Rng, SeedableRng};
         let mut rng = rand::rngs::StdRng::seed_from_u64(0);
@@ -60,7 +60,7 @@ fn main() {
         println!("{}\n{}", hex::encode(&*db.root_hash()), db.dump());
     }
     {
-        let db = DB::new("persistent_merkle_simple", &cfg.truncate(false).build()).unwrap();
+        let db = DB::new("simple_db", &cfg.truncate(false).build()).unwrap();
         println!("{}\n{}", hex::encode(&*db.root_hash()), db.dump());
     }
 }

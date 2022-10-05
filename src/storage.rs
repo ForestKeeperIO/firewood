@@ -786,11 +786,19 @@ enum BufferCmd {
 }
 
 #[derive(TypedBuilder, Clone)]
+pub struct WALConfig {
+    #[builder(default = 22)] // 4MB WAL logs
+    pub(crate) file_nbit: u64,
+    #[builder(default = 15)] // 32KB
+    pub(crate) block_nbit: u64,
+    #[builder(default = 100)] // preserve a rolling window of 100 past commits
+    pub(crate) max_revisions: u32,
+}
+
+#[derive(TypedBuilder, Clone)]
 pub struct DiskBufferConfig {
     #[builder(default = 4096)]
     max_buffered: usize,
-    #[builder(default = 1024)]
-    max_wal_buffered: usize,
     #[builder(default = 4096)]
     max_pending: usize,
     #[builder(default = 128)]
@@ -801,14 +809,10 @@ pub struct DiskBufferConfig {
     max_aio_submit: usize,
     #[builder(default = 32)]
     wal_max_aio_requests: usize,
-    #[builder(default = 22)] // 4MB WAL logs
-    wal_file_nbit: u64,
-    #[builder(default = 15)] // 32KB
-    wal_block_nbit: u64,
-    #[builder(default = 100)] // preserve 100 past commits
-    pub(crate) max_revisions: u32,
+    #[builder(default = 1024)]
+    wal_max_buffered: usize,
     #[builder(default = 4096)]
-    max_wal_batch: usize,
+    wal_max_batch: usize,
 }
 
 struct PendingPage {
@@ -831,10 +835,11 @@ pub struct DiskBuffer {
     tasks: Rc<RefCell<HashMap<u64, Option<tokio::task::JoinHandle<()>>>>>,
     wal: Option<Rc<Mutex<WALWriter<WALStoreAIO>>>>,
     cfg: DiskBufferConfig,
+    wal_cfg: WALConfig,
 }
 
 impl DiskBuffer {
-    pub fn new(cfg: &DiskBufferConfig) -> Option<Self> {
+    pub fn new(cfg: &DiskBufferConfig, wal: &WALConfig) -> Option<Self> {
         const INIT: Option<Rc<FilePool>> = None;
 
         let (sender, inbound) = mpsc::channel(cfg.max_buffered);
@@ -859,6 +864,7 @@ impl DiskBuffer {
             task_id: 0,
             tasks: Rc::new(RefCell::new(HashMap::new())),
             wal: None,
+            wal_cfg: wal.clone(),
         })
     }
 
@@ -921,8 +927,8 @@ impl DiskBuffer {
         let store = WALStoreAIO::new(&waldir, false, Some(rootfd), Some(aiomgr)).map_err(|_| ())?;
         let mut loader = WALLoader::new();
         loader
-            .file_nbit(self.cfg.wal_file_nbit)
-            .block_nbit(self.cfg.wal_block_nbit)
+            .file_nbit(self.wal_cfg.file_nbit)
+            .block_nbit(self.wal_cfg.block_nbit)
             .recover_policy(RecoverPolicy::Strict);
         if self.wal.is_some() {
             // already initialized
@@ -950,7 +956,7 @@ impl DiskBuffer {
                     }
                     Ok(())
                 },
-                self.cfg.max_revisions,
+                self.wal_cfg.max_revisions,
             )
             .await?;
         self.wal = Some(Rc::new(Mutex::new(wal)));
@@ -972,7 +978,7 @@ impl DiskBuffer {
             while let Ok((bw, ac)) = writes.try_recv() {
                 records.push(ac);
                 bwrites.extend(bw);
-                if records.len() >= self.cfg.max_wal_batch {
+                if records.len() >= self.cfg.wal_max_batch {
                     break
                 }
             }
@@ -1009,7 +1015,7 @@ impl DiskBuffer {
                 }
             }
             let wal = self.wal.as_ref().unwrap().clone();
-            let max_revisions = self.cfg.max_revisions;
+            let max_revisions = self.wal_cfg.max_revisions;
             self.start_task(async move {
                 let _ = sem.acquire_many(npermit).await.unwrap();
                 wal.lock()
@@ -1079,7 +1085,7 @@ impl DiskBuffer {
     pub async fn run(mut self) {
         std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
         let wal_in = {
-            let (tx, rx) = mpsc::channel(self.cfg.max_wal_buffered);
+            let (tx, rx) = mpsc::channel(self.cfg.wal_max_buffered);
             let s = unsafe { self.get_longlive_self() };
             self.start_task(s.run_wal_queue(rx));
             tx

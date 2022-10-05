@@ -2,8 +2,8 @@ use std::collections::VecDeque;
 
 #[test]
 fn test_revisions() {
-    use firewood::db::{DBConfig, DiskBufferConfig, DB};
-    use rand::{rngs::StdRng, seq::SliceRandom, Rng, SeedableRng};
+    use firewood::db::{DBConfig, WALConfig, DB};
+    use rand::{rngs::StdRng, Rng, SeedableRng};
     let cfg = DBConfig::builder()
         .meta_ncached_pages(1024)
         .meta_ncached_files(128)
@@ -11,10 +11,10 @@ fn test_revisions() {
         .compact_ncached_files(128)
         .compact_file_nbit(16)
         .compact_regn_nbit(16)
-        .buffer(
-            DiskBufferConfig::builder()
-                .wal_file_nbit(15)
-                .wal_block_nbit(8)
+        .wal(
+            WALConfig::builder()
+                .file_nbit(15)
+                .block_nbit(8)
                 .max_revisions(10)
                 .build(),
         );

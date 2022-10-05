@@ -1,4 +1,4 @@
-use firewood::db::{DBConfig, DiskBufferConfig, DB};
+use firewood::db::{DBConfig, WALConfig, DB};
 
 fn main() {
     let cfg = DBConfig::builder()
@@ -6,7 +6,7 @@ fn main() {
         .meta_ncached_files(128)
         .compact_ncached_pages(1024)
         .compact_ncached_files(128)
-        .buffer(DiskBufferConfig::builder().max_revisions(10).build());
+        .wal(WALConfig::builder().max_revisions(10).build());
     {
         let db = DB::new("rev_db", &cfg.clone().truncate(true).build()).unwrap();
         let items = vec![

@@ -8,8 +8,8 @@ use typed_builder::TypedBuilder;
 
 use crate::file;
 use crate::merkle::{Hash, Merkle, MerkleHeader};
-pub use crate::storage::DiskBufferConfig;
 use crate::storage::{CachedSpace, DiskBuffer, MemStoreR, StoreConfig, StoreRevMut, StoreRevShared};
+pub use crate::storage::{DiskBufferConfig, WALConfig};
 
 const MERKLE_META_SPACE: SpaceID = 0x0;
 const MERKLE_COMPACT_SPACE: SpaceID = 0x1;
@@ -28,6 +28,8 @@ struct DBHeader {
     meta_file_nbit: u64,
     compact_file_nbit: u64,
     compact_regn_nbit: u64,
+    wal_file_nbit: u64,
+    wal_block_nbit: u64,
 }
 
 #[derive(TypedBuilder)]
@@ -50,6 +52,8 @@ pub struct DBConfig {
     merkle_ncached_objs: usize,
     #[builder(default = DiskBufferConfig::builder().build())]
     buffer: DiskBufferConfig,
+    #[builder(default = WALConfig::builder().build())]
+    wal: WALConfig,
 }
 
 struct MerkleSpace<T> {
@@ -70,7 +74,7 @@ struct DBInner {
     staging: MerkleSpace<Rc<StoreRevMut>>,
     cached: MerkleSpace<Rc<CachedSpace>>,
     revisions: VecDeque<MerkleSpace<StoreRevShared>>,
-    max_nrev: usize,
+    max_revisions: usize,
 }
 
 impl Drop for DBInner {
@@ -112,6 +116,8 @@ impl DB {
                 meta_file_nbit: cfg.meta_file_nbit,
                 compact_file_nbit: cfg.compact_file_nbit,
                 compact_regn_nbit: cfg.compact_regn_nbit,
+                wal_file_nbit: cfg.wal.file_nbit,
+                wal_block_nbit: cfg.wal.block_nbit,
             };
             nix::sys::uio::pwrite(fd0, &shale::util::get_raw_bytes(&header), 0).map_err(DBError::System)?;
         }
@@ -164,7 +170,12 @@ impl DB {
             ),
         );
 
-        let mut disk_buffer = DiskBuffer::new(&cfg.buffer).unwrap();
+        let wal = WALConfig::builder()
+            .file_nbit(header.wal_file_nbit)
+            .block_nbit(header.wal_block_nbit)
+            .max_revisions(cfg.wal.max_revisions)
+            .build();
+        let mut disk_buffer = DiskBuffer::new(&cfg.buffer, &wal).unwrap();
         disk_buffer.reg_cached_space(cached.meta.as_ref());
         disk_buffer.reg_cached_space(cached.payload.as_ref());
         let disk_requester = disk_buffer.requester().clone();
@@ -214,7 +225,7 @@ impl DB {
                 staging,
                 cached,
                 revisions: VecDeque::new(),
-                max_nrev: cfg.buffer.max_revisions as usize,
+                max_revisions: cfg.wal.max_revisions as usize,
             }),
             compact_regn_nbit: header.compact_regn_nbit,
             merkle_ncached_objs: cfg.merkle_ncached_objs,
@@ -222,7 +233,10 @@ impl DB {
     }
 
     pub fn new_writebatch(&self) -> WriteBatch {
-        WriteBatch { m: self.inner.lock(), committed: false }
+        WriteBatch {
+            m: self.inner.lock(),
+            committed: false,
+        }
     }
 
     pub fn root_hash(&self) -> Hash {
@@ -240,7 +254,7 @@ impl DB {
     pub fn get_revision(&self, nback: usize, ncached_objs: Option<usize>) -> Option<Revision> {
         let mut inner = self.inner.lock();
         let rlen = inner.revisions.len();
-        if nback == 0 || nback > inner.max_nrev {
+        if nback == 0 || nback > inner.max_revisions {
             return None
         }
         if rlen < nback {
@@ -355,7 +369,7 @@ impl<'a> WriteBatch<'a> {
             rev.payload.set_prev(new_base.payload.inner().clone());
         }
         inner.revisions.push_front(new_base);
-        while inner.revisions.len() > inner.max_nrev {
+        while inner.revisions.len() > inner.max_revisions {
             inner.revisions.pop_back();
         }
 
