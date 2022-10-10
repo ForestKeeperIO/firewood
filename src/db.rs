@@ -3,16 +3,20 @@ use std::rc::Rc;
 use std::thread::JoinHandle;
 
 use parking_lot::{Mutex, MutexGuard};
+use primitive_types::U256;
 use shale::{compact::CompactSpaceHeader, MemStore, MummyItem, MummyObj, ObjPtr, SpaceID};
 use typed_builder::TypedBuilder;
 
+use crate::account::{Account, BlobStash};
 use crate::file;
 use crate::merkle::{Hash, Merkle, MerkleHeader};
-use crate::storage::{CachedSpace, DiskBuffer, MemStoreR, StoreConfig, StoreRevMut, StoreRevShared};
+use crate::storage::{CachedSpace, DiskBuffer, MemStoreR, SpaceWrite, StoreConfig, StoreRevMut, StoreRevShared};
 pub use crate::storage::{DiskBufferConfig, WALConfig};
 
 const MERKLE_META_SPACE: SpaceID = 0x0;
 const MERKLE_COMPACT_SPACE: SpaceID = 0x1;
+const BLOB_META_SPACE: SpaceID = 0x2;
+const BLOB_COMPACT_SPACE: SpaceID = 0x3;
 const SPACE_RESERVED: u64 = 0x1000;
 
 #[derive(Debug)]
@@ -32,6 +36,14 @@ struct DBHeader {
     wal_block_nbit: u64,
 }
 
+#[derive(TypedBuilder, Clone)]
+pub struct DBRevConfig {
+    #[builder(default = 65536)]
+    merkle_ncached_objs: usize,
+    #[builder(default = 4096)]
+    blob_ncached_objs: usize,
+}
+
 #[derive(TypedBuilder)]
 pub struct DBConfig {
     meta_ncached_pages: usize,
@@ -48,32 +60,99 @@ pub struct DBConfig {
     compact_regn_nbit: u64,
     #[builder(default = false)]
     truncate: bool,
-    #[builder(default = 65536)]
-    merkle_ncached_objs: usize,
+    #[builder(default = DBRevConfig::builder().build())]
+    rev: DBRevConfig,
     #[builder(default = DiskBufferConfig::builder().build())]
     buffer: DiskBufferConfig,
     #[builder(default = WALConfig::builder().build())]
     wal: WALConfig,
 }
 
-struct DBSpace<T> {
+struct SubSpace<T> {
     meta: T,
     payload: T,
 }
 
-impl<T> DBSpace<T> {
+impl<T> SubSpace<T> {
     fn new(meta: T, payload: T) -> Self {
         Self { meta, payload }
     }
 }
 
-struct DBInner {
+impl SubSpace<StoreRevShared> {
+    fn to_mem_store_r(&self) -> SubSpace<Rc<dyn MemStoreR>> {
+        SubSpace {
+            meta: self.meta.inner().clone(),
+            payload: self.payload.inner().clone(),
+        }
+    }
+}
+
+impl SubSpace<Rc<dyn MemStoreR>> {
+    fn rewind(&self, meta_writes: &[SpaceWrite], payload_writes: &[SpaceWrite]) -> SubSpace<StoreRevShared> {
+        SubSpace::new(
+            StoreRevShared::from_ash(self.meta.clone(), &meta_writes),
+            StoreRevShared::from_ash(self.payload.clone(), &payload_writes),
+        )
+    }
+}
+
+impl SubSpace<Rc<CachedSpace>> {
+    fn to_mem_store_r(&self) -> SubSpace<Rc<dyn MemStoreR>> {
+        SubSpace {
+            meta: self.meta.clone(),
+            payload: self.payload.clone(),
+        }
+    }
+}
+
+struct Universe<T> {
+    merkle: SubSpace<T>,
+    blob: SubSpace<T>,
+}
+
+impl Universe<StoreRevShared> {
+    fn to_mem_store_r(&self) -> Universe<Rc<dyn MemStoreR>> {
+        Universe {
+            merkle: self.merkle.to_mem_store_r(),
+            blob: self.blob.to_mem_store_r(),
+        }
+    }
+}
+
+impl Universe<Rc<CachedSpace>> {
+    fn to_mem_store_r(&self) -> Universe<Rc<dyn MemStoreR>> {
+        Universe {
+            merkle: self.merkle.to_mem_store_r(),
+            blob: self.blob.to_mem_store_r(),
+        }
+    }
+}
+
+impl Universe<Rc<dyn MemStoreR>> {
+    fn rewind(
+        &self, merkle_meta_writes: &[SpaceWrite], merkle_payload_writes: &[SpaceWrite],
+        blob_meta_writes: &[SpaceWrite], blob_payload_writes: &[SpaceWrite],
+    ) -> Universe<StoreRevShared> {
+        Universe {
+            merkle: self.merkle.rewind(merkle_meta_writes, merkle_payload_writes),
+            blob: self.blob.rewind(blob_meta_writes, blob_payload_writes),
+        }
+    }
+}
+
+struct DBRev {
     merkle: Merkle,
+    blob: BlobStash,
+}
+
+struct DBInner {
+    latest: DBRev,
     disk_requester: crate::storage::DiskBufferRequester,
     disk_thread: Option<JoinHandle<()>>,
-    staging: DBSpace<Rc<StoreRevMut>>,
-    cached: DBSpace<Rc<CachedSpace>>,
-    revisions: VecDeque<DBSpace<StoreRevShared>>,
+    staging: Universe<Rc<StoreRevMut>>,
+    cached: Universe<Rc<CachedSpace>>,
+    revisions: VecDeque<Universe<StoreRevShared>>,
     max_revisions: usize,
 }
 
@@ -87,7 +166,7 @@ impl Drop for DBInner {
 pub struct DB {
     inner: Mutex<DBInner>,
     compact_regn_nbit: u64,
-    merkle_ncached_objs: usize,
+    rev_cfg: DBRevConfig,
 }
 
 impl DB {
@@ -100,16 +179,17 @@ impl DB {
 
         let merkle_fd = file::touch_dir("merkle", db_fd).map_err(DBError::System)?;
         let merkle_meta_fd = file::touch_dir("meta", merkle_fd).map_err(DBError::System)?;
-        let merkle_compact_fd = file::touch_dir("compact", merkle_fd).map_err(DBError::System)?;
+        let merkle_payload_fd = file::touch_dir("compact", merkle_fd).map_err(DBError::System)?;
 
         let blob_fd = file::touch_dir("blob", db_fd).map_err(DBError::System)?;
         let blob_meta_fd = file::touch_dir("meta", blob_fd).map_err(DBError::System)?;
-        let blob_compact_fd = file::touch_dir("compact", blob_fd).map_err(DBError::System)?;
+        let blob_payload_fd = file::touch_dir("compact", blob_fd).map_err(DBError::System)?;
 
         let file0 = crate::file::File::new(0, SPACE_RESERVED, merkle_meta_fd).map_err(DBError::System)?;
         let fd0 = file0.get_fd();
 
         if reset {
+            // initialize DBHeader
             if cfg.compact_file_nbit < cfg.compact_regn_nbit || cfg.compact_regn_nbit < crate::storage::PAGE_SIZE_NBIT {
                 return Err(DBError::InvalidParams)
             }
@@ -136,46 +216,61 @@ impl DB {
         let mut offset = header_bytes.len() as u64;
         let header = unsafe { std::mem::transmute::<_, DBHeader>(header_bytes) };
 
-        // set up the storage layout
-        let compact_header: ObjPtr<CompactSpaceHeader>;
-        let merkle_header: ObjPtr<MerkleHeader>;
-        unsafe {
-            // CompactHeader starts after DBHeader in meta space
-            compact_header = ObjPtr::new_from_addr(offset);
-            offset += CompactSpaceHeader::MSIZE;
-            // MerkleHeader starts after CompactHeader in meta space
-            merkle_header = ObjPtr::new_from_addr(offset);
-            offset += MerkleHeader::MSIZE;
-            assert!(offset <= SPACE_RESERVED);
-        }
-
         // setup disk buffer
-        let cached = DBSpace::new(
-            Rc::new(
-                CachedSpace::new(
-                    &StoreConfig::builder()
-                        .ncached_pages(cfg.meta_ncached_pages)
-                        .ncached_files(cfg.meta_ncached_files)
-                        .space_id(MERKLE_META_SPACE)
-                        .file_nbit(header.meta_file_nbit)
-                        .rootfd(merkle_meta_fd)
-                        .build(),
-                )
-                .unwrap(),
+        let cached = Universe {
+            merkle: SubSpace::new(
+                Rc::new(
+                    CachedSpace::new(
+                        &StoreConfig::builder()
+                            .ncached_pages(cfg.meta_ncached_pages)
+                            .ncached_files(cfg.meta_ncached_files)
+                            .space_id(MERKLE_META_SPACE)
+                            .file_nbit(header.meta_file_nbit)
+                            .rootfd(merkle_meta_fd)
+                            .build(),
+                    )
+                    .unwrap(),
+                ),
+                Rc::new(
+                    CachedSpace::new(
+                        &StoreConfig::builder()
+                            .ncached_pages(cfg.compact_ncached_pages)
+                            .ncached_files(cfg.compact_ncached_files)
+                            .space_id(MERKLE_COMPACT_SPACE)
+                            .file_nbit(header.compact_file_nbit)
+                            .rootfd(merkle_payload_fd)
+                            .build(),
+                    )
+                    .unwrap(),
+                ),
             ),
-            Rc::new(
-                CachedSpace::new(
-                    &StoreConfig::builder()
-                        .ncached_pages(cfg.compact_ncached_pages)
-                        .ncached_files(cfg.compact_ncached_files)
-                        .space_id(MERKLE_COMPACT_SPACE)
-                        .file_nbit(header.compact_file_nbit)
-                        .rootfd(merkle_compact_fd)
-                        .build(),
-                )
-                .unwrap(),
+            blob: SubSpace::new(
+                Rc::new(
+                    CachedSpace::new(
+                        &StoreConfig::builder()
+                            .ncached_pages(cfg.meta_ncached_pages)
+                            .ncached_files(cfg.meta_ncached_files)
+                            .space_id(BLOB_META_SPACE)
+                            .file_nbit(header.meta_file_nbit)
+                            .rootfd(blob_meta_fd)
+                            .build(),
+                    )
+                    .unwrap(),
+                ),
+                Rc::new(
+                    CachedSpace::new(
+                        &StoreConfig::builder()
+                            .ncached_pages(cfg.compact_ncached_pages)
+                            .ncached_files(cfg.compact_ncached_files)
+                            .space_id(BLOB_COMPACT_SPACE)
+                            .file_nbit(header.compact_file_nbit)
+                            .rootfd(blob_payload_fd)
+                            .build(),
+                    )
+                    .unwrap(),
+                ),
             ),
-        );
+        };
 
         let wal = WALConfig::builder()
             .file_nbit(header.wal_file_nbit)
@@ -189,48 +284,102 @@ impl DB {
             let disk_buffer = DiskBuffer::new(inbound, &buffer, &wal).unwrap();
             disk_buffer.run()
         }));
-        disk_requester.reg_cached_space(cached.meta.as_ref());
-        disk_requester.reg_cached_space(cached.payload.as_ref());
 
-        let staging = DBSpace::new(
-            Rc::new(StoreRevMut::new(cached.meta.clone() as Rc<dyn MemStoreR>)),
-            Rc::new(StoreRevMut::new(cached.payload.clone() as Rc<dyn MemStoreR>)),
-        );
+        disk_requester.reg_cached_space(cached.merkle.meta.as_ref());
+        disk_requester.reg_cached_space(cached.merkle.payload.as_ref());
+        disk_requester.reg_cached_space(cached.blob.meta.as_ref());
+        disk_requester.reg_cached_space(cached.blob.payload.as_ref());
+
+        let staging = Universe {
+            merkle: SubSpace::new(
+                Rc::new(StoreRevMut::new(cached.merkle.meta.clone() as Rc<dyn MemStoreR>)),
+                Rc::new(StoreRevMut::new(cached.merkle.payload.clone() as Rc<dyn MemStoreR>)),
+            ),
+            blob: SubSpace::new(
+                Rc::new(StoreRevMut::new(cached.blob.meta.clone() as Rc<dyn MemStoreR>)),
+                Rc::new(StoreRevMut::new(cached.blob.payload.clone() as Rc<dyn MemStoreR>)),
+            ),
+        };
+
+        // set up the storage layout
+        let merkle_payload_header: ObjPtr<CompactSpaceHeader>;
+        let merkle_header: ObjPtr<MerkleHeader>;
+        let blob_payload_header: ObjPtr<CompactSpaceHeader>;
+        unsafe {
+            // Merkle CompactHeader starts after DBHeader in merkle meta space
+            merkle_payload_header = ObjPtr::new_from_addr(offset);
+            offset += CompactSpaceHeader::MSIZE;
+            // MerkleHeader starts after CompactHeader in merkle meta space
+            merkle_header = ObjPtr::new_from_addr(offset);
+            offset += MerkleHeader::MSIZE;
+            assert!(offset <= SPACE_RESERVED);
+            // Blob CompactSpaceHeader starts right in blob meta space
+            blob_payload_header = ObjPtr::new_from_addr(0);
+        }
 
         if reset {
-            // initialize headers
-            staging.meta.write(
-                compact_header.addr(),
+            // initialize space headers
+            staging.merkle.meta.write(
+                merkle_payload_header.addr(),
                 &shale::compact::CompactSpaceHeader::new(SPACE_RESERVED, SPACE_RESERVED).dehydrate(),
             );
             staging
+                .merkle
                 .meta
                 .write(merkle_header.addr(), &MerkleHeader::new_empty().dehydrate());
+            staging.blob.meta.write(
+                blob_payload_header.addr(),
+                &shale::compact::CompactSpaceHeader::new(SPACE_RESERVED, SPACE_RESERVED).dehydrate(),
+            );
         }
 
-        let staging_meta_ref = staging.meta.as_ref() as &dyn MemStore;
-        let (ch_ref, mh_ref) = unsafe {
+        let (merkle_payload_header_ref, merkle_header_ref, blob_payload_header_ref) = unsafe {
+            let merkle_meta_ref = staging.merkle.meta.as_ref() as &dyn MemStore;
+            let blob_meta_ref = staging.blob.meta.as_ref() as &dyn MemStore;
+
             (
-                MummyObj::ptr_to_obj(staging_meta_ref, compact_header, shale::compact::CompactHeader::MSIZE).unwrap(),
-                MummyObj::ptr_to_obj(staging_meta_ref, merkle_header, MerkleHeader::MSIZE).unwrap(),
+                MummyObj::ptr_to_obj(
+                    merkle_meta_ref,
+                    merkle_payload_header,
+                    shale::compact::CompactHeader::MSIZE,
+                )
+                .unwrap(),
+                MummyObj::ptr_to_obj(merkle_meta_ref, merkle_header, MerkleHeader::MSIZE).unwrap(),
+                MummyObj::ptr_to_obj(blob_meta_ref, blob_payload_header, shale::compact::CompactHeader::MSIZE).unwrap(),
             )
         };
 
-        let cache = shale::ObjCache::new(cfg.merkle_ncached_objs);
-        let space = shale::compact::CompactSpace::new(
-            staging.meta.clone(),
-            staging.payload.clone(),
-            ch_ref,
-            cache,
+        let merkle_space = shale::compact::CompactSpace::new(
+            staging.merkle.meta.clone(),
+            staging.merkle.payload.clone(),
+            merkle_payload_header_ref,
+            shale::ObjCache::new(cfg.rev.merkle_ncached_objs),
             cfg.compact_max_walk,
             header.compact_regn_nbit,
         )
         .unwrap();
+
+        let blob_space = shale::compact::CompactSpace::new(
+            staging.blob.meta.clone(),
+            staging.blob.payload.clone(),
+            blob_payload_header_ref,
+            shale::ObjCache::new(cfg.rev.blob_ncached_objs),
+            cfg.compact_max_walk,
+            header.compact_regn_nbit,
+        )
+        .unwrap();
+
+        // recover from WAL
         disk_requester.init_wal("wal", db_fd);
-        let merkle = Merkle::new(mh_ref, Box::new(space), false).unwrap();
+
+        let latest = DBRev {
+            merkle: Merkle::new(merkle_header_ref, Box::new(merkle_space), false).unwrap(),
+            blob: BlobStash::new(Box::new(blob_space)),
+        };
+
         Ok(Self {
             inner: Mutex::new(DBInner {
-                merkle,
+                latest,
                 disk_thread,
                 disk_requester,
                 staging,
@@ -239,7 +388,7 @@ impl DB {
                 max_revisions: cfg.wal.max_revisions as usize,
             }),
             compact_regn_nbit: header.compact_regn_nbit,
-            merkle_ncached_objs: cfg.merkle_ncached_objs,
+            rev_cfg: cfg.rev.clone(),
         })
     }
 
@@ -251,18 +400,26 @@ impl DB {
     }
 
     pub fn root_hash(&self) -> Hash {
-        self.inner.lock().merkle.root_hash()
+        self.inner.lock().latest.merkle.root_hash()
     }
 
     pub fn dump(&self) -> String {
-        self.inner.lock().merkle.dump()
+        self.inner.lock().latest.merkle.dump()
     }
 
     pub fn get(&self, key: &[u8]) -> Result<Vec<u8>, DBError> {
-        self.inner.lock().merkle.get(key).map_err(DBError::Merkle)
+        Ok(self
+            .inner
+            .lock()
+            .latest
+            .merkle
+            .get_mut(key)
+            .map_err(DBError::Merkle)?
+            .get()
+            .to_vec())
     }
 
-    pub fn get_revision(&self, nback: usize, ncached_objs: Option<usize>) -> Option<Revision> {
+    pub fn get_revision(&self, nback: usize, cfg: Option<DBRevConfig>) -> Option<Revision> {
         let mut inner = self.inner.lock();
         let rlen = inner.revisions.len();
         if nback == 0 || nback > inner.max_revisions {
@@ -271,17 +428,19 @@ impl DB {
         if rlen < nback {
             let ashes = inner.disk_requester.collect_ash(nback);
             for mut ash in ashes.into_iter().skip(rlen) {
-                let (meta, payload): (Rc<dyn MemStoreR>, Rc<dyn MemStoreR>) = match inner.revisions.back() {
-                    None => (inner.cached.meta.clone(), inner.cached.payload.clone()),
-                    Some(s) => (s.meta.inner().clone(), s.payload.inner().clone()),
-                };
                 for (_, a) in ash.0.iter_mut() {
                     a.old.reverse()
                 }
 
-                inner.revisions.push_back(DBSpace::new(
-                    StoreRevShared::from_ash(meta, &ash.0[&MERKLE_META_SPACE].old).unwrap(),
-                    StoreRevShared::from_ash(payload, &ash.0[&MERKLE_COMPACT_SPACE].old).unwrap(),
+                let u = match inner.revisions.back() {
+                    Some(u) => u.to_mem_store_r(),
+                    None => inner.cached.to_mem_store_r(),
+                };
+                inner.revisions.push_back(u.rewind(
+                    &ash.0[&MERKLE_META_SPACE].old,
+                    &ash.0[&MERKLE_COMPACT_SPACE].old,
+                    &ash.0[&BLOB_META_SPACE].old,
+                    &ash.0[&BLOB_COMPACT_SPACE].old,
                 ));
             }
         }
@@ -289,59 +448,95 @@ impl DB {
             return None
         }
         // set up the storage layout
-        let compact_header: ObjPtr<CompactSpaceHeader>;
+        let merkle_payload_header: ObjPtr<CompactSpaceHeader>;
         let merkle_header: ObjPtr<MerkleHeader>;
+        let blob_payload_header: ObjPtr<CompactSpaceHeader>;
         unsafe {
             let mut offset = std::mem::size_of::<DBHeader>() as u64;
-            // CompactHeader starts after DBHeader in meta space
-            compact_header = ObjPtr::new_from_addr(offset);
+            merkle_payload_header = ObjPtr::new_from_addr(offset);
             offset += CompactSpaceHeader::MSIZE;
-            // MerkleHeader starts after CompactHeader in meta space
             merkle_header = ObjPtr::new_from_addr(offset);
+            blob_payload_header = ObjPtr::new_from_addr(0);
         }
 
         let space = &inner.revisions[nback - 1];
-        let meta_ref = &space.meta as &dyn MemStore;
-        let (ch_ref, mh_ref) = unsafe {
+        let (merkle_payload_header_ref, merkle_header_ref, blob_payload_header_ref) = unsafe {
+            let merkle_meta_ref = &space.merkle.meta as &dyn MemStore;
+            let blob_meta_ref = &space.blob.meta as &dyn MemStore;
             (
-                MummyObj::ptr_to_obj(meta_ref, compact_header, shale::compact::CompactHeader::MSIZE).unwrap(),
-                MummyObj::ptr_to_obj(meta_ref, merkle_header, MerkleHeader::MSIZE).unwrap(),
+                MummyObj::ptr_to_obj(
+                    merkle_meta_ref,
+                    merkle_payload_header,
+                    shale::compact::CompactHeader::MSIZE,
+                )
+                .unwrap(),
+                MummyObj::ptr_to_obj(merkle_meta_ref, merkle_header, MerkleHeader::MSIZE).unwrap(),
+                MummyObj::ptr_to_obj(blob_meta_ref, blob_payload_header, shale::compact::CompactHeader::MSIZE).unwrap(),
             )
         };
 
-        let cache = shale::ObjCache::new(ncached_objs.unwrap_or(self.merkle_ncached_objs));
-        let space = shale::compact::CompactSpace::new(
-            Rc::new(space.meta.clone()),
-            Rc::new(space.payload.clone()),
-            ch_ref,
-            cache,
+        let (merkle_payload_header_ref, merkle_header_ref, blob_payload_header_ref) = unsafe {
+            let merkle_meta_ref = &space.merkle.meta as &dyn MemStore;
+            let blob_meta_ref = &space.blob.meta as &dyn MemStore;
+
+            (
+                MummyObj::ptr_to_obj(
+                    merkle_meta_ref,
+                    merkle_payload_header,
+                    shale::compact::CompactHeader::MSIZE,
+                )
+                .unwrap(),
+                MummyObj::ptr_to_obj(merkle_meta_ref, merkle_header, MerkleHeader::MSIZE).unwrap(),
+                MummyObj::ptr_to_obj(blob_meta_ref, blob_payload_header, shale::compact::CompactHeader::MSIZE).unwrap(),
+            )
+        };
+
+        let merkle_space = shale::compact::CompactSpace::new(
+            Rc::new(space.merkle.meta.clone()),
+            Rc::new(space.merkle.payload.clone()),
+            merkle_payload_header_ref,
+            shale::ObjCache::new(cfg.as_ref().unwrap_or(&self.rev_cfg).merkle_ncached_objs),
             0,
             self.compact_regn_nbit,
         )
         .unwrap();
+
+        let blob_space = shale::compact::CompactSpace::new(
+            Rc::new(space.blob.meta.clone()),
+            Rc::new(space.blob.payload.clone()),
+            blob_payload_header_ref,
+            shale::ObjCache::new(cfg.as_ref().unwrap_or(&self.rev_cfg).blob_ncached_objs),
+            0,
+            self.compact_regn_nbit,
+        )
+        .unwrap();
+
         Some(Revision {
             _m: inner,
-            merkle: Merkle::new(mh_ref, Box::new(space), true)?,
+            rev: DBRev {
+                merkle: Merkle::new(merkle_header_ref, Box::new(merkle_space), true)?,
+                blob: BlobStash::new(Box::new(blob_space)),
+            },
         })
     }
 }
 
 pub struct Revision<'a> {
     _m: MutexGuard<'a, DBInner>,
-    merkle: Merkle,
+    rev: DBRev,
 }
 
 impl<'a> Revision<'a> {
     pub fn root_hash(&self) -> Hash {
-        self.merkle.root_hash()
+        self.rev.merkle.root_hash()
     }
 
     pub fn dump(&self) -> String {
-        self.merkle.dump()
+        self.rev.merkle.dump()
     }
 
-    pub fn get(&self, key: &[u8]) -> Result<Vec<u8>, DBError> {
-        self.merkle.get(key).map_err(DBError::Merkle)
+    pub fn get_mut(&mut self, key: &[u8]) -> Result<crate::merkle::RefMut, DBError> {
+        self.rev.merkle.get_mut(key).map_err(DBError::Merkle)
     }
 }
 
@@ -352,32 +547,77 @@ pub struct WriteBatch<'a> {
 
 impl<'a> WriteBatch<'a> {
     pub fn insert<K: AsRef<[u8]>>(&mut self, key: K, val: Vec<u8>) -> Result<(), DBError> {
-        self.m.merkle.insert(key, val).map_err(DBError::Merkle)
+        self.m.latest.merkle.insert(key, val).map_err(DBError::Merkle)
     }
 
     pub fn remove<K: AsRef<[u8]>>(&mut self, key: K) -> Result<bool, DBError> {
-        self.m.merkle.remove(key).map_err(DBError::Merkle)
+        self.m.latest.merkle.remove(key).map_err(DBError::Merkle)
+    }
+
+    fn change_account(&mut self, key: &[u8], modify: impl FnOnce(&mut Account)) -> Result<(), DBError> {
+        match self.m.latest.merkle.get_mut(key) {
+            Ok(mut bytes) => {
+                bytes
+                    .write(|b| {
+                        let mut acc = Account::deserialize(b);
+                        modify(&mut acc);
+                        *b = acc.serialize();
+                    })
+                    .map_err(DBError::Merkle)?;
+            }
+            Err(crate::merkle::MerkleError::KeyNotFound) => {
+                let mut acc = Account::default();
+                modify(&mut acc);
+                self.m
+                    .latest
+                    .merkle
+                    .insert(key, acc.serialize())
+                    .map_err(DBError::Merkle)?;
+            }
+            Err(e) => return Err(DBError::Merkle(e)),
+        }
+        Ok(())
+    }
+
+    pub fn set_balance(&mut self, key: &[u8], balance: U256) -> Result<(), DBError> {
+        self.change_account(key, |acc| acc.balance = balance)
+    }
+
+    pub fn set_nonce(&mut self, key: &[u8], nonce: u64) -> Result<(), DBError> {
+        self.change_account(key, |acc| acc.nonce = nonce)
     }
 
     pub fn commit(mut self) {
         use crate::storage::BufferWrite;
         let inner = &mut *self.m;
         // clear the staging layer and apply changes to the CachedSpace
-        let (payload_pages, payload_plain) = inner.staging.payload.take_delta();
-        let (meta_pages, meta_plain) = inner.staging.meta.take_delta();
+        let (merkle_payload_pages, merkle_payload_plain) = inner.staging.merkle.payload.take_delta();
+        let (merkle_meta_pages, merkle_meta_plain) = inner.staging.merkle.meta.take_delta();
+        let (blob_payload_pages, blob_payload_plain) = inner.staging.blob.payload.take_delta();
+        let (blob_meta_pages, blob_meta_plain) = inner.staging.blob.meta.take_delta();
 
-        let old_meta_delta = inner.cached.meta.update(&meta_pages).unwrap();
-        let old_payload_delta = inner.cached.payload.update(&payload_pages).unwrap();
+        let old_merkle_meta_delta = inner.cached.merkle.meta.update(&merkle_meta_pages).unwrap();
+        let old_merkle_payload_delta = inner.cached.merkle.payload.update(&merkle_payload_pages).unwrap();
+        let old_blob_meta_delta = inner.cached.blob.meta.update(&blob_meta_pages).unwrap();
+        let old_blob_payload_delta = inner.cached.blob.payload.update(&blob_payload_pages).unwrap();
 
         // update the rolling window of past revisions
-        let new_base = DBSpace::new(
-            StoreRevShared::from_delta(inner.cached.meta.clone(), old_meta_delta),
-            StoreRevShared::from_delta(inner.cached.payload.clone(), old_payload_delta),
-        );
+        let new_base = Universe {
+            merkle: SubSpace::new(
+                StoreRevShared::from_delta(inner.cached.merkle.meta.clone(), old_merkle_meta_delta),
+                StoreRevShared::from_delta(inner.cached.merkle.payload.clone(), old_merkle_payload_delta),
+            ),
+            blob: SubSpace::new(
+                StoreRevShared::from_delta(inner.cached.blob.meta.clone(), old_blob_meta_delta),
+                StoreRevShared::from_delta(inner.cached.blob.payload.clone(), old_blob_payload_delta),
+            ),
+        };
 
         if let Some(rev) = inner.revisions.front_mut() {
-            rev.meta.set_prev(new_base.meta.inner().clone());
-            rev.payload.set_prev(new_base.payload.inner().clone());
+            rev.merkle.meta.set_prev(new_base.merkle.meta.inner().clone());
+            rev.merkle.payload.set_prev(new_base.merkle.payload.inner().clone());
+            rev.blob.meta.set_prev(new_base.blob.meta.inner().clone());
+            rev.blob.payload.set_prev(new_base.blob.payload.inner().clone());
         }
         inner.revisions.push_front(new_base);
         while inner.revisions.len() > inner.max_revisions {
@@ -390,15 +630,31 @@ impl<'a> WriteBatch<'a> {
         inner.disk_requester.write(
             vec![
                 BufferWrite {
-                    space_id: inner.staging.payload.id(),
-                    delta: payload_pages,
+                    space_id: inner.staging.merkle.payload.id(),
+                    delta: merkle_payload_pages,
                 },
                 BufferWrite {
-                    space_id: inner.staging.meta.id(),
-                    delta: meta_pages,
+                    space_id: inner.staging.merkle.meta.id(),
+                    delta: merkle_meta_pages,
+                },
+                BufferWrite {
+                    space_id: inner.staging.blob.payload.id(),
+                    delta: blob_payload_pages,
+                },
+                BufferWrite {
+                    space_id: inner.staging.blob.meta.id(),
+                    delta: blob_meta_pages,
                 },
             ],
-            crate::storage::AshRecord([(MERKLE_COMPACT_SPACE, payload_plain), (MERKLE_META_SPACE, meta_plain)].into()),
+            crate::storage::AshRecord(
+                [
+                    (MERKLE_META_SPACE, merkle_meta_plain),
+                    (MERKLE_COMPACT_SPACE, merkle_payload_plain),
+                    (BLOB_META_SPACE, blob_meta_plain),
+                    (BLOB_COMPACT_SPACE, blob_payload_plain),
+                ]
+                .into(),
+            ),
         );
     }
 }
@@ -407,8 +663,10 @@ impl<'a> Drop for WriteBatch<'a> {
     fn drop(&mut self) {
         if !self.committed {
             // drop the staging changes
-            self.m.staging.payload.take_delta();
-            self.m.staging.meta.take_delta();
+            self.m.staging.merkle.payload.take_delta();
+            self.m.staging.merkle.meta.take_delta();
+            self.m.staging.blob.payload.take_delta();
+            self.m.staging.blob.meta.take_delta();
         }
     }
 }

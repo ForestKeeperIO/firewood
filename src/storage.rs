@@ -142,12 +142,12 @@ impl std::ops::Deref for StoreDelta {
 }
 
 impl StoreDelta {
-    pub fn new(src: &dyn MemStoreR, writes: &[SpaceWrite]) -> Option<Self> {
+    pub fn new(src: &dyn MemStoreR, writes: &[SpaceWrite]) -> Self {
         let mut deltas = Vec::new();
         let mut widx: Vec<_> = (0..writes.len()).filter(|i| writes[*i].data.len() > 0).collect();
         if widx.is_empty() {
             // the writes are all empty
-            return None
+            return Self(deltas)
         }
 
         // sort by the starting point
@@ -210,7 +210,7 @@ impl StoreDelta {
                 deltas[l].data_mut()[..data.len()].copy_from_slice(&data);
             }
         }
-        Some(Self(deltas))
+        Self(deltas)
     }
 
     pub fn len(&self) -> usize {
@@ -294,10 +294,10 @@ impl MemStoreR for StoreRev {
 pub struct StoreRevShared(Rc<StoreRev>);
 
 impl StoreRevShared {
-    pub fn from_ash(prev: Rc<dyn MemStoreR>, writes: &[SpaceWrite]) -> Option<Self> {
-        let delta = StoreDelta::new(prev.as_ref(), writes)?;
+    pub fn from_ash(prev: Rc<dyn MemStoreR>, writes: &[SpaceWrite]) -> Self {
+        let delta = StoreDelta::new(prev.as_ref(), writes);
         let prev = RefCell::new(prev);
-        Some(Self(Rc::new(StoreRev { prev, delta })))
+        Self(Rc::new(StoreRev { prev, delta }))
     }
 
     pub fn from_delta(prev: Rc<dyn MemStoreR>, delta: StoreDelta) -> Self {
@@ -535,7 +535,7 @@ fn test_from_ash() {
             writes.push(SpaceWrite { offset: l, data });
         }
         let z = Rc::new(ZeroStore::new());
-        let rev = StoreRevShared::from_ash(z, &writes).unwrap();
+        let rev = StoreRevShared::from_ash(z, &writes);
         println!("{:?}", rev);
         assert_eq!(rev.get_view(min, max - min).unwrap().deref(), &canvas);
         for _ in 0..2 * n {

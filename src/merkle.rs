@@ -458,7 +458,7 @@ fn test_merkle_node_encoding() {
 }
 
 macro_rules! write_node {
-    ($self: ident, $r: expr, $modify: expr, $parents: expr, $deleted: expr) => {
+    ($self: expr, $r: expr, $modify: expr, $parents: expr, $deleted: expr) => {
         if let None = $r.write($modify) {
             let ptr = $self.new_node($r.clone())?.as_ptr();
             $self.set_parent(ptr, $parents);
@@ -479,10 +479,18 @@ impl Merkle {
     fn get_node(&self, ptr: ObjPtr<Node>) -> Result<ObjRef<Node>, MerkleError> {
         self.store.get_item(ptr).map_err(MerkleError::Shale)
     }
+    fn new_node(&self, item: Node) -> Result<ObjRef<Node>, MerkleError> {
+        self.store.put_item(item, 0).map_err(MerkleError::Shale)
+    }
+    fn free_node(&mut self, ptr: ObjPtr<Node>) -> Result<(), MerkleError> {
+        self.store.free_item(ptr).map_err(MerkleError::Shale)
+    }
 }
 
 impl Merkle {
-    pub fn new(mut header: shale::Obj<MerkleHeader>, store: Box<dyn ShaleStore<Node>>, read_only: bool) -> Option<Self> {
+    pub fn new(
+        mut header: shale::Obj<MerkleHeader>, store: Box<dyn ShaleStore<Node>>, read_only: bool,
+    ) -> Option<Self> {
         // FIXME move out the store ownership and use configurable parameter
         if header.root.is_null() {
             if read_only {
@@ -562,10 +570,6 @@ impl Merkle {
             self.dump_(root, &mut s);
             s
         }
-    }
-
-    fn new_node(&self, item: Node) -> Result<ObjRef<Node>, MerkleError> {
-        self.store.put_item(item, 0).map_err(MerkleError::Shale)
     }
 
     fn set_parent<'b>(&self, new_chd: ObjPtr<Node>, parents: &mut [(ObjRef<'b, Node>, u8)]) {
@@ -887,7 +891,7 @@ impl Merkle {
         }
 
         for ptr in deleted.into_iter() {
-            self.store.free_item(ptr).map_err(MerkleError::Shale)?;
+            self.free_node(ptr)?
         }
         Ok(())
     }
@@ -1255,15 +1259,16 @@ impl Merkle {
         }
 
         for ptr in deleted.into_iter() {
-            self.store.free_item(ptr).map_err(MerkleError::Shale)?;
+            self.free_node(ptr)?;
         }
         Ok(found)
     }
 
-    pub fn get(&self, key: &[u8]) -> Result<Vec<u8>, MerkleError> {
+    pub fn get_mut(&mut self, key: &[u8]) -> Result<RefMut, MerkleError> {
         let root = self.header.root;
         let mut chunks = vec![0];
         chunks.extend(to_nibbles(key.as_ref()));
+        let mut parents = Vec::new();
 
         if root.is_null() {
             return Err(MerkleError::KeyNotFound)
@@ -1273,6 +1278,7 @@ impl Merkle {
         let mut nskip = 0;
 
         for (i, nib) in chunks.iter().enumerate() {
+            let u_ptr = u_ref.as_ptr();
             if nskip > 0 {
                 nskip -= 1;
                 continue
@@ -1286,7 +1292,8 @@ impl Merkle {
                     if &chunks[i..] != &*n.0 {
                         return Err(MerkleError::KeyNotFound)
                     }
-                    return Ok(n.1.to_vec())
+                    drop(u_ref);
+                    return Ok(RefMut::new(u_ptr, parents, self))
                 }
                 NodeType::Extension(n) => {
                     let n_path = &*n.0;
@@ -1298,24 +1305,83 @@ impl Merkle {
                     n.1
                 }
             };
+            parents.push((u_ptr, *nib));
             u_ref = self.get_node(next_ptr)?;
         }
 
+        let u_ptr = u_ref.as_ptr();
         match &u_ref.inner {
             NodeType::Branch(n) => {
                 if let Some(v) = n.value.as_ref() {
-                    return Ok(v.to_vec())
+                    drop(u_ref);
+                    return Ok(RefMut::new(u_ptr, parents, self))
                 }
             }
             NodeType::Leaf(n) => {
                 if n.0.len() == 0 {
-                    return Ok(n.1.to_vec())
+                    drop(u_ref);
+                    return Ok(RefMut::new(u_ptr, parents, self))
                 }
             }
             _ => (),
         }
 
         Err(MerkleError::KeyNotFound)
+    }
+}
+
+pub struct Ref<'a>(ObjRef<'a, Node>);
+
+pub struct RefMut<'a> {
+    ptr: ObjPtr<Node>,
+    parents: Vec<(ObjPtr<Node>, u8)>,
+    merkle: &'a mut Merkle,
+}
+
+impl<'a> std::ops::Deref for Ref<'a> {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match &self.0.inner {
+            NodeType::Branch(n) => n.value.as_ref().unwrap(),
+            NodeType::Leaf(n) => &n.1,
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl<'a> RefMut<'a> {
+    fn new(ptr: ObjPtr<Node>, parents: Vec<(ObjPtr<Node>, u8)>, merkle: &'a mut Merkle) -> Self {
+        Self { ptr, parents, merkle }
+    }
+
+    pub fn get<'b>(&'b mut self) -> Ref<'b> {
+        Ref(self.merkle.get_node(self.ptr).unwrap())
+    }
+
+    pub fn write(&mut self, modify: impl FnOnce(&mut Vec<u8>) -> ()) -> Result<(), MerkleError> {
+        let mut deleted = Vec::new();
+        {
+        let mut u_ref = self.merkle.get_node(self.ptr).unwrap();
+        let mut parents: Vec<_> = self.parents.iter().map(|(ptr, nib)| (self.merkle.get_node(*ptr).unwrap(), *nib)).collect();
+        write_node!(
+            self.merkle,
+            u_ref,
+            |u| {
+                modify(match &mut u.inner {
+                    NodeType::Branch(n) => &mut n.value.as_mut().unwrap().0,
+                    NodeType::Leaf(n) => &mut n.1.0,
+                    _ => unreachable!(),
+                });
+                u.rehash(self.merkle.store.as_ref())
+            },
+            &mut parents,
+            &mut deleted
+        );
+        }
+        for ptr in deleted.into_iter() {
+            self.merkle.free_node(ptr)?;
+        }
+        Ok(())
     }
 }
 
