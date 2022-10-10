@@ -562,7 +562,7 @@ pub struct StoreConfig {
 struct CachedSpaceInner {
     cached_pages: lru::LruCache<u64, Box<Page>>,
     pinned_pages: HashMap<u64, (usize, Box<Page>)>,
-    files: Rc<FilePool>,
+    files: Arc<FilePool>,
     disk_buffer: DiskBufferRequester,
 }
 
@@ -575,7 +575,7 @@ pub struct CachedSpace {
 impl CachedSpace {
     pub fn new(cfg: &StoreConfig) -> Result<Self, StoreError> {
         let space_id = cfg.space_id;
-        let files = Rc::new(FilePool::new(cfg)?);
+        let files = Arc::new(FilePool::new(cfg)?);
         Ok(Self {
             inner: Rc::new(RefCell::new(CachedSpaceInner {
                 cached_pages: lru::LruCache::new(NonZeroUsize::new(cfg.ncached_pages).expect("non-zero cache size")),
@@ -718,8 +718,8 @@ impl MemStoreR for CachedSpace {
     }
 }
 
-struct FilePool {
-    files: RefCell<lru::LruCache<u64, Rc<File>>>,
+pub struct FilePool {
+    files: parking_lot::Mutex<lru::LruCache<u64, Arc<File>>>,
     file_nbit: u64,
     rootfd: Fd,
 }
@@ -729,7 +729,7 @@ impl FilePool {
         let rootfd = cfg.rootfd;
         let file_nbit = cfg.file_nbit;
         let s = Self {
-            files: RefCell::new(lru::LruCache::new(
+            files: parking_lot::Mutex::new(lru::LruCache::new(
                 NonZeroUsize::new(cfg.ncached_files).expect("non-zero file num"),
             )),
             file_nbit,
@@ -742,15 +742,15 @@ impl FilePool {
         Ok(s)
     }
 
-    fn get_file(&self, fid: u64) -> Result<Rc<File>, StoreError> {
-        let mut files = self.files.borrow_mut();
+    fn get_file(&self, fid: u64) -> Result<Arc<File>, StoreError> {
+        let mut files = self.files.lock();
         let file_size = 1 << self.file_nbit;
         Ok(match files.get(&fid) {
             Some(f) => f.clone(),
             None => {
                 files.put(
                     fid,
-                    Rc::new(File::new(fid, file_size, self.rootfd).map_err(StoreError::System)?),
+                    Arc::new(File::new(fid, file_size, self.rootfd).map_err(StoreError::System)?),
                 );
                 files.peek(&fid).unwrap().clone()
             }
@@ -776,12 +776,12 @@ pub struct BufferWrite {
     pub delta: StoreDelta,
 }
 
-#[derive(Debug)]
-enum BufferCmd {
+pub enum BufferCmd {
     InitWAL(Fd, String),
     WriteBatch(Vec<BufferWrite>, AshRecord),
     GetPage((SpaceID, u64), oneshot::Sender<Option<Arc<Page>>>),
     CollectAsh(usize, oneshot::Sender<Vec<AshRecord>>),
+    RegCachedSpace(SpaceID, Arc<FilePool>),
     Shutdown,
 }
 
@@ -798,7 +798,7 @@ pub struct WALConfig {
 #[derive(TypedBuilder, Clone)]
 pub struct DiskBufferConfig {
     #[builder(default = 4096)]
-    max_buffered: usize,
+    pub(crate) max_buffered: usize,
     #[builder(default = 4096)]
     max_pending: usize,
     #[builder(default = 128)]
@@ -825,10 +825,9 @@ struct PendingPage {
 pub struct DiskBuffer {
     pending: HashMap<(SpaceID, u64), PendingPage>,
     inbound: mpsc::Receiver<BufferCmd>,
-    requester: DiskBufferRequester,
     fc_notifier: Option<oneshot::Sender<()>>,
     fc_blocker: Option<oneshot::Receiver<()>>,
-    file_pools: [Option<Rc<FilePool>>; 255],
+    file_pools: [Option<Arc<FilePool>>; 255],
     aiomgr: AIOManager,
     local_pool: Rc<tokio::task::LocalSet>,
     task_id: u64,
@@ -839,11 +838,8 @@ pub struct DiskBuffer {
 }
 
 impl DiskBuffer {
-    pub fn new(cfg: &DiskBufferConfig, wal: &WALConfig) -> Option<Self> {
-        const INIT: Option<Rc<FilePool>> = None;
-
-        let (sender, inbound) = mpsc::channel(cfg.max_buffered);
-        let requester = DiskBufferRequester::new(sender);
+    pub fn new(inbound: mpsc::Receiver<BufferCmd>, cfg: &DiskBufferConfig, wal: &WALConfig) -> Option<Self> {
+        const INIT: Option<Arc<FilePool>> = None;
         let aiomgr = AIOBuilder::default()
             .max_events(cfg.max_aio_requests)
             .max_nwait(cfg.max_aio_response)
@@ -855,7 +851,6 @@ impl DiskBuffer {
             pending: HashMap::new(),
             cfg: cfg.clone(),
             inbound,
-            requester,
             fc_notifier: None,
             fc_blocker: None,
             file_pools: [INIT; 255],
@@ -866,12 +861,6 @@ impl DiskBuffer {
             wal: None,
             wal_cfg: wal.clone(),
         })
-    }
-
-    pub fn reg_cached_space(&mut self, space: &CachedSpace) {
-        let mut inner = space.inner.borrow_mut();
-        inner.disk_buffer = self.requester().clone();
-        self.file_pools[space.id() as usize] = Some(inner.files.clone())
     }
 
     unsafe fn get_longlive_self(&mut self) -> &'static mut Self {
@@ -1064,6 +1053,7 @@ impl DiskBuffer {
                     .collect();
                 tx.send(ash).unwrap();
             }
+            BufferCmd::RegCachedSpace(space_id, files) => self.file_pools[space_id as usize] = Some(files),
         }
         true
     }
@@ -1116,13 +1106,7 @@ impl DiskBuffer {
             })
             .await;
     }
-
-    pub fn requester(&self) -> &DiskBufferRequester {
-        &self.requester
-    }
 }
-
-unsafe impl Send for DiskBuffer {}
 
 #[derive(Clone)]
 pub struct DiskBufferRequester {
@@ -1138,7 +1122,7 @@ impl Default for DiskBufferRequester {
 }
 
 impl DiskBufferRequester {
-    fn new(sender: mpsc::Sender<BufferCmd>) -> Self {
+    pub fn new(sender: mpsc::Sender<BufferCmd>) -> Self {
         Self { sender }
     }
 
@@ -1146,6 +1130,7 @@ impl DiskBufferRequester {
         let (resp_tx, resp_rx) = oneshot::channel();
         self.sender
             .blocking_send(BufferCmd::GetPage((space_id, pid), resp_tx))
+            .ok()
             .unwrap();
         resp_rx.blocking_recv().unwrap()
     }
@@ -1153,16 +1138,18 @@ impl DiskBufferRequester {
     pub fn write(&self, page_batch: Vec<BufferWrite>, write_batch: AshRecord) {
         self.sender
             .blocking_send(BufferCmd::WriteBatch(page_batch, write_batch))
+            .ok()
             .unwrap()
     }
 
     pub fn shutdown(&self) {
-        self.sender.blocking_send(BufferCmd::Shutdown).unwrap()
+        self.sender.blocking_send(BufferCmd::Shutdown).ok().unwrap()
     }
 
     pub fn init_wal(&self, waldir: &str, rootfd: Fd) {
         self.sender
             .blocking_send(BufferCmd::InitWAL(rootfd, waldir.to_string()))
+            .ok()
             .unwrap()
     }
 
@@ -1170,8 +1157,18 @@ impl DiskBufferRequester {
         let (resp_tx, resp_rx) = oneshot::channel();
         self.sender
             .blocking_send(BufferCmd::CollectAsh(nrecords, resp_tx))
+            .ok()
             .unwrap();
         resp_rx.blocking_recv().unwrap()
+    }
+
+    pub fn reg_cached_space(&self, space: &CachedSpace) {
+        let mut inner = space.inner.borrow_mut();
+        inner.disk_buffer = self.clone();
+        self.sender
+            .blocking_send(BufferCmd::RegCachedSpace(space.id(), inner.files.clone()))
+            .ok()
+            .unwrap()
     }
 }
 

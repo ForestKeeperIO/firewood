@@ -56,12 +56,12 @@ pub struct DBConfig {
     wal: WALConfig,
 }
 
-struct MerkleSpace<T> {
+struct DBSpace<T> {
     meta: T,
     payload: T,
 }
 
-impl<T> MerkleSpace<T> {
+impl<T> DBSpace<T> {
     fn new(meta: T, payload: T) -> Self {
         Self { meta, payload }
     }
@@ -71,9 +71,9 @@ struct DBInner {
     merkle: Merkle,
     disk_requester: crate::storage::DiskBufferRequester,
     disk_thread: Option<JoinHandle<()>>,
-    staging: MerkleSpace<Rc<StoreRevMut>>,
-    cached: MerkleSpace<Rc<CachedSpace>>,
-    revisions: VecDeque<MerkleSpace<StoreRevShared>>,
+    staging: DBSpace<Rc<StoreRevMut>>,
+    cached: DBSpace<Rc<CachedSpace>>,
+    revisions: VecDeque<DBSpace<StoreRevShared>>,
     max_revisions: usize,
 }
 
@@ -92,14 +92,21 @@ pub struct DB {
 
 impl DB {
     pub fn new(db_path: &str, cfg: &DBConfig) -> Result<Self, DBError> {
+        // TODO: make sure all fds are released at the end
         if cfg.truncate {
             let _ = std::fs::remove_dir_all(db_path);
         }
         let (db_fd, reset) = file::open_dir(db_path, cfg.truncate).map_err(DBError::System)?;
-        let meta_fd = file::touch_dir("meta", db_fd).map_err(DBError::System)?;
-        let compact_fd = file::touch_dir("compact", db_fd).map_err(DBError::System)?;
 
-        let file0 = crate::file::File::new(0, SPACE_RESERVED, meta_fd).map_err(DBError::System)?;
+        let merkle_fd = file::touch_dir("merkle", db_fd).map_err(DBError::System)?;
+        let merkle_meta_fd = file::touch_dir("meta", merkle_fd).map_err(DBError::System)?;
+        let merkle_compact_fd = file::touch_dir("compact", merkle_fd).map_err(DBError::System)?;
+
+        let blob_fd = file::touch_dir("blob", db_fd).map_err(DBError::System)?;
+        let blob_meta_fd = file::touch_dir("meta", blob_fd).map_err(DBError::System)?;
+        let blob_compact_fd = file::touch_dir("compact", blob_fd).map_err(DBError::System)?;
+
+        let file0 = crate::file::File::new(0, SPACE_RESERVED, merkle_meta_fd).map_err(DBError::System)?;
         let fd0 = file0.get_fd();
 
         if reset {
@@ -143,7 +150,7 @@ impl DB {
         }
 
         // setup disk buffer
-        let cached = MerkleSpace::new(
+        let cached = DBSpace::new(
             Rc::new(
                 CachedSpace::new(
                     &StoreConfig::builder()
@@ -151,7 +158,7 @@ impl DB {
                         .ncached_files(cfg.meta_ncached_files)
                         .space_id(MERKLE_META_SPACE)
                         .file_nbit(header.meta_file_nbit)
-                        .rootfd(meta_fd)
+                        .rootfd(merkle_meta_fd)
                         .build(),
                 )
                 .unwrap(),
@@ -163,7 +170,7 @@ impl DB {
                         .ncached_files(cfg.compact_ncached_files)
                         .space_id(MERKLE_COMPACT_SPACE)
                         .file_nbit(header.compact_file_nbit)
-                        .rootfd(compact_fd)
+                        .rootfd(merkle_compact_fd)
                         .build(),
                 )
                 .unwrap(),
@@ -175,13 +182,17 @@ impl DB {
             .block_nbit(header.wal_block_nbit)
             .max_revisions(cfg.wal.max_revisions)
             .build();
-        let mut disk_buffer = DiskBuffer::new(&cfg.buffer, &wal).unwrap();
-        disk_buffer.reg_cached_space(cached.meta.as_ref());
-        disk_buffer.reg_cached_space(cached.payload.as_ref());
-        let disk_requester = disk_buffer.requester().clone();
-        let disk_thread = Some(std::thread::spawn(move || disk_buffer.run()));
+        let (sender, inbound) = tokio::sync::mpsc::channel(cfg.buffer.max_buffered);
+        let disk_requester = crate::storage::DiskBufferRequester::new(sender);
+        let buffer = cfg.buffer.clone();
+        let disk_thread = Some(std::thread::spawn(move || {
+            let disk_buffer = DiskBuffer::new(inbound, &buffer, &wal).unwrap();
+            disk_buffer.run()
+        }));
+        disk_requester.reg_cached_space(cached.meta.as_ref());
+        disk_requester.reg_cached_space(cached.payload.as_ref());
 
-        let staging = MerkleSpace::new(
+        let staging = DBSpace::new(
             Rc::new(StoreRevMut::new(cached.meta.clone() as Rc<dyn MemStoreR>)),
             Rc::new(StoreRevMut::new(cached.payload.clone() as Rc<dyn MemStoreR>)),
         );
@@ -268,7 +279,7 @@ impl DB {
                     a.old.reverse()
                 }
 
-                inner.revisions.push_back(MerkleSpace::new(
+                inner.revisions.push_back(DBSpace::new(
                     StoreRevShared::from_ash(meta, &ash.0[&MERKLE_META_SPACE].old).unwrap(),
                     StoreRevShared::from_ash(payload, &ash.0[&MERKLE_COMPACT_SPACE].old).unwrap(),
                 ));
@@ -359,7 +370,7 @@ impl<'a> WriteBatch<'a> {
         let old_payload_delta = inner.cached.payload.update(&payload_pages).unwrap();
 
         // update the rolling window of past revisions
-        let new_base = MerkleSpace::new(
+        let new_base = DBSpace::new(
             StoreRevShared::from_delta(inner.cached.meta.clone(), old_meta_delta),
             StoreRevShared::from_delta(inner.cached.payload.clone(), old_payload_delta),
         );

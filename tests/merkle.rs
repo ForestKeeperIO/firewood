@@ -26,7 +26,7 @@ fn merkle_setup_test(meta_size: u64, compact_size: u64) -> Merkle {
         )
     };
 
-    let cache = shale::ObjCache::new(1024);
+    let cache = shale::ObjCache::new(65536);
     let space = shale::compact::CompactSpace::new(mem_meta, mem_payload, compact_header, cache, 10, 16).unwrap();
     Merkle::new(merkle_header, Box::new(space), false).unwrap()
 }
@@ -87,13 +87,13 @@ fn test_root_hash_fuzz_insertions() {
             .collect();
         key
     };
-    for _ in 0..1000 {
+    for _ in 0..10 {
         let mut items = Vec::new();
-        for _ in 0..100 {
+        for _ in 0..10000 {
             let val: Vec<u8> = (0..8).map(|_| rng.borrow_mut().gen()).collect();
             items.push((keygen(), val));
         }
-        merkle_build_test(items, 0x100000, 0x100000);
+        merkle_build_test(items, 0x1000000, 0x1000000);
     }
 }
 
