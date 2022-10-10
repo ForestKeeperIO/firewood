@@ -7,9 +7,9 @@ use primitive_types::U256;
 use shale::{compact::CompactSpaceHeader, MemStore, MummyItem, MummyObj, ObjPtr, SpaceID};
 use typed_builder::TypedBuilder;
 
-use crate::account::{Account, BlobStash};
+use crate::account::{Account, Blob, BlobStash};
 use crate::file;
-use crate::merkle::{Hash, Merkle, MerkleHeader};
+use crate::merkle::{Hash, Merkle, MerkleError, MerkleHeader};
 use crate::storage::{CachedSpace, DiskBuffer, MemStoreR, SpaceWrite, StoreConfig, StoreRevMut, StoreRevShared};
 pub use crate::storage::{DiskBufferConfig, WALConfig};
 
@@ -22,7 +22,8 @@ const SPACE_RESERVED: u64 = 0x1000;
 #[derive(Debug)]
 pub enum DBError {
     InvalidParams,
-    Merkle(crate::merkle::MerkleError),
+    Merkle(MerkleError),
+    Blob(crate::account::BlobError),
     System(nix::Error),
 }
 
@@ -141,9 +142,54 @@ impl Universe<Rc<dyn MemStoreR>> {
     }
 }
 
-struct DBRev {
+pub struct DBRev {
     merkle: Merkle,
     blob: BlobStash,
+}
+
+impl DBRev {
+    fn borrow_split(&mut self) -> (&mut Merkle, &mut BlobStash) {
+        (&mut self.merkle, &mut self.blob)
+    }
+
+    pub fn root_hash(&self) -> Hash {
+        self.merkle.root_hash()
+    }
+
+    pub fn dump(&self) -> String {
+        self.merkle.dump()
+    }
+
+    fn get_account(&self, key: &[u8]) -> Result<Account, DBError> {
+        Ok(match self.merkle.get(key) {
+            Ok(bytes) => Account::deserialize(&*bytes),
+            Err(MerkleError::KeyNotFound) => Account::default(),
+            Err(e) => return Err(DBError::Merkle(e)),
+        })
+    }
+
+    pub fn get_balance(&self, key: &[u8]) -> Result<U256, DBError> {
+        Ok(self.get_account(key)?.balance)
+    }
+
+    pub fn get_code(&self, key: &[u8]) -> Result<Vec<u8>, DBError> {
+        let b = self.blob.get_blob(self.get_account(key)?.code).map_err(DBError::Blob)?;
+        Ok(match &**b {
+            Blob::Code(code) => code.clone(),
+        })
+    }
+
+    pub fn get_nonce(&self, key: &[u8]) -> Result<u64, DBError> {
+        Ok(self.get_account(key)?.nonce)
+    }
+
+    pub fn exist(&self, key: &[u8]) -> Result<bool, DBError> {
+        Ok(match self.merkle.get(key) {
+            Ok(_) => true,
+            Err(MerkleError::KeyNotFound) => false,
+            Err(e) => return Err(DBError::Merkle(e)),
+        })
+    }
 }
 
 struct DBInner {
@@ -400,23 +446,27 @@ impl DB {
     }
 
     pub fn root_hash(&self) -> Hash {
-        self.inner.lock().latest.merkle.root_hash()
+        self.inner.lock().latest.root_hash()
     }
 
     pub fn dump(&self) -> String {
-        self.inner.lock().latest.merkle.dump()
+        self.inner.lock().latest.dump()
     }
 
-    pub fn get(&self, key: &[u8]) -> Result<Vec<u8>, DBError> {
-        Ok(self
-            .inner
-            .lock()
-            .latest
-            .merkle
-            .get_mut(key)
-            .map_err(DBError::Merkle)?
-            .get()
-            .to_vec())
+    pub fn get_balance(&self, key: &[u8]) -> Result<U256, DBError> {
+        self.inner.lock().latest.get_balance(key)
+    }
+
+    pub fn get_code(&self, key: &[u8]) -> Result<Vec<u8>, DBError> {
+        self.inner.lock().latest.get_code(key)
+    }
+
+    pub fn get_nonce(&self, key: &[u8]) -> Result<u64, DBError> {
+        self.inner.lock().latest.get_nonce(key)
+    }
+
+    pub fn exist(&self, key: &[u8]) -> Result<bool, DBError> {
+        self.inner.lock().latest.exist(key)
     }
 
     pub fn get_revision(&self, nback: usize, cfg: Option<DBRevConfig>) -> Option<Revision> {
@@ -460,20 +510,6 @@ impl DB {
         }
 
         let space = &inner.revisions[nback - 1];
-        let (merkle_payload_header_ref, merkle_header_ref, blob_payload_header_ref) = unsafe {
-            let merkle_meta_ref = &space.merkle.meta as &dyn MemStore;
-            let blob_meta_ref = &space.blob.meta as &dyn MemStore;
-            (
-                MummyObj::ptr_to_obj(
-                    merkle_meta_ref,
-                    merkle_payload_header,
-                    shale::compact::CompactHeader::MSIZE,
-                )
-                .unwrap(),
-                MummyObj::ptr_to_obj(merkle_meta_ref, merkle_header, MerkleHeader::MSIZE).unwrap(),
-                MummyObj::ptr_to_obj(blob_meta_ref, blob_payload_header, shale::compact::CompactHeader::MSIZE).unwrap(),
-            )
-        };
 
         let (merkle_payload_header_ref, merkle_header_ref, blob_payload_header_ref) = unsafe {
             let merkle_meta_ref = &space.merkle.meta as &dyn MemStore;
@@ -526,17 +562,10 @@ pub struct Revision<'a> {
     rev: DBRev,
 }
 
-impl<'a> Revision<'a> {
-    pub fn root_hash(&self) -> Hash {
-        self.rev.merkle.root_hash()
-    }
-
-    pub fn dump(&self) -> String {
-        self.rev.merkle.dump()
-    }
-
-    pub fn get_mut(&mut self, key: &[u8]) -> Result<crate::merkle::RefMut, DBError> {
-        self.rev.merkle.get_mut(key).map_err(DBError::Merkle)
+impl<'a> std::ops::Deref for Revision<'a> {
+    type Target = DBRev;
+    fn deref(&self) -> &DBRev {
+        &self.rev
     }
 }
 
@@ -554,20 +583,28 @@ impl<'a> WriteBatch<'a> {
         self.m.latest.merkle.remove(key).map_err(DBError::Merkle)
     }
 
-    fn change_account(&mut self, key: &[u8], modify: impl FnOnce(&mut Account)) -> Result<(), DBError> {
-        match self.m.latest.merkle.get_mut(key) {
+    fn change_account(
+        &mut self, key: &[u8], modify: impl FnOnce(&mut Account, &mut BlobStash) -> Result<(), DBError>,
+    ) -> Result<(), DBError> {
+        let (merkle, blob) = self.m.latest.borrow_split();
+        match merkle.get_mut(key) {
             Ok(mut bytes) => {
+                let mut ret = Ok(());
                 bytes
                     .write(|b| {
                         let mut acc = Account::deserialize(b);
-                        modify(&mut acc);
+                        ret = modify(&mut acc, blob);
+                        if ret.is_err() {
+                            return
+                        }
                         *b = acc.serialize();
                     })
                     .map_err(DBError::Merkle)?;
+                ret?;
             }
-            Err(crate::merkle::MerkleError::KeyNotFound) => {
+            Err(MerkleError::KeyNotFound) => {
                 let mut acc = Account::default();
-                modify(&mut acc);
+                modify(&mut acc, &mut self.m.latest.blob)?;
                 self.m
                     .latest
                     .merkle
@@ -580,11 +617,38 @@ impl<'a> WriteBatch<'a> {
     }
 
     pub fn set_balance(&mut self, key: &[u8], balance: U256) -> Result<(), DBError> {
-        self.change_account(key, |acc| acc.balance = balance)
+        self.change_account(key, |acc, _| Ok(acc.balance = balance))
+    }
+
+    pub fn set_code(&mut self, key: &[u8], code: &[u8]) -> Result<(), DBError> {
+        self.change_account(key, |acc, blob_stash| {
+            if !acc.code.is_null() {
+                blob_stash.free_blob(acc.code).map_err(DBError::Blob)?;
+            }
+            Ok(acc.code = blob_stash
+                .new_blob(Blob::Code(code.to_vec()))
+                .map_err(DBError::Blob)?
+                .as_ptr())
+        })
     }
 
     pub fn set_nonce(&mut self, key: &[u8], nonce: u64) -> Result<(), DBError> {
-        self.change_account(key, |acc| acc.nonce = nonce)
+        self.change_account(key, |acc, _| Ok(acc.nonce = nonce))
+    }
+
+    pub fn create_account(&mut self, key: &[u8]) -> Result<(), DBError> {
+        let old_balance = match self.m.latest.merkle.get_mut(key) {
+            Ok(bytes) => Account::deserialize(&*bytes.get()).balance,
+            Err(MerkleError::KeyNotFound) => U256::zero(),
+            Err(e) => return Err(DBError::Merkle(e)),
+        };
+        let mut acc = Account::default();
+        acc.balance = old_balance;
+        self.m
+            .latest
+            .merkle
+            .insert(key, acc.serialize())
+            .map_err(DBError::Merkle)
     }
 
     pub fn commit(mut self) {
