@@ -1073,7 +1073,6 @@ impl DiskBuffer {
 
     #[tokio::main(flavor = "current_thread")]
     pub async fn run(mut self) {
-        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
         let wal_in = {
             let (tx, rx) = mpsc::channel(self.cfg.wal_max_buffered);
             let s = unsafe { self.get_longlive_self() };
