@@ -183,6 +183,18 @@ impl DBRev {
         Ok(self.get_account(key)?.nonce)
     }
 
+    pub fn get_state(&self, key: &[u8], sub_key: &[u8]) -> Result<Vec<u8>, DBError> {
+        let root = self.get_account(key)?.root;
+        if root.is_null() {
+            return Ok(Vec::new())
+        }
+        Ok(match self.merkle.get_with_root(sub_key, root) {
+            Ok(v) => v.to_vec(),
+            Err(MerkleError::KeyNotFound) => Vec::new(),
+            Err(e) => return Err(DBError::Merkle(e)),
+        })
+    }
+
     pub fn exist(&self, key: &[u8]) -> Result<bool, DBError> {
         Ok(match self.merkle.get(key) {
             Ok(_) => true,
@@ -465,6 +477,10 @@ impl DB {
         self.inner.lock().latest.get_nonce(key)
     }
 
+    pub fn get_state(&self, key: &[u8], sub_key: &[u8]) -> Result<Vec<u8>, DBError> {
+        self.inner.lock().latest.get_state(key, sub_key)
+    }
+
     pub fn exist(&self, key: &[u8]) -> Result<bool, DBError> {
         self.inner.lock().latest.exist(key)
     }
@@ -634,6 +650,20 @@ impl<'a> WriteBatch<'a> {
 
     pub fn set_nonce(&mut self, key: &[u8], nonce: u64) -> Result<(), DBError> {
         self.change_account(key, |acc, _| Ok(acc.nonce = nonce))
+    }
+
+    pub fn set_state(&mut self, key: &[u8], sub_key: &[u8], val: Vec<u8>) -> Result<(), DBError> {
+        let merkle = &mut self.m.latest.merkle;
+        let mut acc = match merkle.get(key) {
+            Ok(r) => Account::deserialize(&*r),
+            Err(MerkleError::KeyNotFound) => Account::default(),
+            Err(e) => return Err(DBError::Merkle(e)),
+        };
+        if acc.root.is_null() {
+            Merkle::init_root(&mut acc.root, merkle.get_store()).map_err(DBError::Merkle)?;
+            merkle.insert(key, acc.serialize()).map_err(DBError::Merkle)?;
+        }
+        merkle.insert_with_root(sub_key, val, acc.root).map_err(DBError::Merkle)
     }
 
     pub fn create_account(&mut self, key: &[u8]) -> Result<(), DBError> {

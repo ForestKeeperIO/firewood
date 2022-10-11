@@ -277,6 +277,23 @@ impl NodeType {
 }
 
 impl Node {
+    fn max_branch_node_size() -> u64 {
+        const MAX_SIZE: OnceCell<u64> = OnceCell::new();
+        *MAX_SIZE.get_or_init(|| {
+            Self {
+                root_hash: Hash([0; 32]),
+                eth_rlp_long: false,
+                eth_rlp: OnceCell::new(),
+                inner: NodeType::Branch(BranchNode {
+                    chd: [Some(ObjPtr::null()); NBRANCH],
+                    value: Some(Data(Vec::new())),
+                }),
+            }
+            .dehydrate()
+            .len() as u64
+        })
+    }
+
     fn get_eth_rlp(&self, store: &dyn ShaleStore<Node>) -> &[u8] {
         self.eth_rlp.get_or_init(|| self.inner.calc_eth_rlp(store))
     }
@@ -498,24 +515,30 @@ impl Merkle {
             }
             // create the sentinel node
             header
-                .write(|r| {
-                    r.root = store
-                        .put_item(
-                            Node::new(
-                                NodeType::Branch(BranchNode {
-                                    chd: [None; NBRANCH],
-                                    value: None,
-                                }),
-                                store.as_ref(),
-                            ),
-                            256,
-                        )
-                        .unwrap()
-                        .as_ptr()
-                })
+                .write(|r| Self::init_root(&mut r.root, store.as_ref()).unwrap())
                 .unwrap();
         }
         Some(Self { header, store })
+    }
+
+    pub fn init_root(root: &mut ObjPtr<Node>, store: &dyn ShaleStore<Node>) -> Result<(), MerkleError> {
+        Ok(*root = store
+            .put_item(
+                Node::new(
+                    NodeType::Branch(BranchNode {
+                        chd: [None; NBRANCH],
+                        value: None,
+                    }),
+                    store,
+                ),
+                Node::max_branch_node_size(),
+            )
+            .map_err(MerkleError::Shale)?
+            .as_ptr())
+    }
+
+    pub fn get_store(&self) -> &dyn ShaleStore<Node> {
+        self.store.as_ref()
     }
 
     fn empty_root() -> &'static Hash {
@@ -735,9 +758,10 @@ impl Merkle {
         Ok(None)
     }
 
-    pub fn insert<K: AsRef<[u8]>>(&mut self, key: K, val: Vec<u8>) -> Result<(), MerkleError> {
+    pub fn insert_with_root<K: AsRef<[u8]>>(
+        &mut self, key: K, val: Vec<u8>, root: ObjPtr<Node>,
+    ) -> Result<(), MerkleError> {
         let mut deleted = Vec::new();
-        let root = self.header.root;
         let mut chunks = vec![0];
         chunks.extend(to_nibbles(key.as_ref()));
         let mut parents = Vec::new();
@@ -894,6 +918,10 @@ impl Merkle {
             self.free_node(ptr)?
         }
         Ok(())
+    }
+
+    pub fn insert<K: AsRef<[u8]>>(&mut self, key: K, val: Vec<u8>) -> Result<(), MerkleError> {
+        self.insert_with_root(key, val, self.header.root)
     }
 
     fn after_remove_leaf<'b>(
@@ -1264,8 +1292,7 @@ impl Merkle {
         Ok(found)
     }
 
-    pub fn get_mut(&mut self, key: &[u8]) -> Result<RefMut, MerkleError> {
-        let root = self.header.root;
+    pub fn get_mut_with_root(&mut self, key: &[u8], root: ObjPtr<Node>) -> Result<RefMut, MerkleError> {
         let mut chunks = vec![0];
         chunks.extend(to_nibbles(key.as_ref()));
         let mut parents = Vec::new();
@@ -1329,8 +1356,11 @@ impl Merkle {
         Err(MerkleError::KeyNotFound)
     }
 
-    pub fn get(&self, key: &[u8]) -> Result<Ref, MerkleError> {
-        let root = self.header.root;
+    pub fn get_mut(&mut self, key: &[u8]) -> Result<RefMut, MerkleError> {
+        self.get_mut_with_root(key, self.header.root)
+    }
+
+    pub fn get_with_root(&self, key: &[u8], root: ObjPtr<Node>) -> Result<Ref, MerkleError> {
         let mut chunks = vec![0];
         chunks.extend(to_nibbles(key.as_ref()));
 
@@ -1385,6 +1415,10 @@ impl Merkle {
         }
 
         Err(MerkleError::KeyNotFound)
+    }
+
+    pub fn get(&self, key: &[u8]) -> Result<Ref, MerkleError> {
+        self.get_with_root(key, self.header.root)
     }
 }
 
