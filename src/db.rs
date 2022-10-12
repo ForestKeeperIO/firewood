@@ -19,6 +19,8 @@ const BLOB_META_SPACE: SpaceID = 0x2;
 const BLOB_COMPACT_SPACE: SpaceID = 0x3;
 const SPACE_RESERVED: u64 = 0x1000;
 
+const MAGIC_STR: &[u8; 13] = b"firewood v0.1";
+
 #[derive(Debug)]
 pub enum DBError {
     InvalidParams,
@@ -309,9 +311,8 @@ impl DB {
             }
             nix::unistd::ftruncate(fd0, 0).map_err(DBError::System)?;
             nix::unistd::ftruncate(fd0, 1 << cfg.meta_file_nbit).map_err(DBError::System)?;
-            let magic_str = b"firewood v0.1";
             let mut magic = [0; 16];
-            magic[..magic_str.len()].copy_from_slice(magic_str);
+            magic[..MAGIC_STR.len()].copy_from_slice(MAGIC_STR);
             let header = DBHeader {
                 magic: magic,
                 meta_file_nbit: cfg.meta_file_nbit,
