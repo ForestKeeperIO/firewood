@@ -15,5 +15,6 @@ fn main() {
         &cfg.truncate(false).build(),
     )
     .unwrap();
-    println!("{}\n{}", hex::encode(&*db.root_hash()), db.dump());
+    println!("== Account Model ==\n{}", db.dump());
+    println!("== Generic KV ==\n{}", db.kv_dump());
 }

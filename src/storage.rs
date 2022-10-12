@@ -323,7 +323,7 @@ impl MemStore for StoreRevShared {
 
     fn write(&self, _offset: u64, _change: &[u8]) {
         // StoreRevShared is a read-only view version of MemStore
-        unimplemented!()
+        // Writes could be induced by lazy hashing and we can just ignore those
     }
 
     fn id(&self) -> SpaceID {

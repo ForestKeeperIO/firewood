@@ -2,7 +2,30 @@ use firewood::merkle::*;
 use shale::{MemStore, MummyItem, MummyObj, ObjPtr};
 use std::rc::Rc;
 
-fn merkle_setup_test(meta_size: u64, compact_size: u64) -> Merkle {
+struct MerkleSetup {
+    root: ObjPtr<Node>,
+    merkle: Merkle,
+}
+
+impl MerkleSetup {
+    fn insert<K: AsRef<[u8]>>(&mut self, key: K, val: Vec<u8>) {
+        self.merkle.insert(key, val, self.root).unwrap()
+    }
+
+    fn remove<K: AsRef<[u8]>>(&mut self, key: K) {
+        self.merkle.remove(key, self.root).unwrap();
+    }
+
+    fn root_hash(&self) -> Hash {
+        self.merkle.root_hash::<IdTrans>(self.root).unwrap()
+    }
+
+    fn dump(&self) -> String {
+        self.merkle.dump(self.root)
+    }
+}
+
+fn merkle_setup_test(meta_size: u64, compact_size: u64) -> MerkleSetup {
     use shale::{compact::CompactSpaceHeader, PlainMem};
     const RESERVED: u64 = 0x1000;
     assert!(meta_size > RESERVED);
@@ -10,33 +33,32 @@ fn merkle_setup_test(meta_size: u64, compact_size: u64) -> Merkle {
     let mem_meta = Rc::new(PlainMem::new(meta_size, 0x0)) as Rc<dyn MemStore>;
     let mem_payload = Rc::new(PlainMem::new(compact_size, 0x1));
     let compact_header: ObjPtr<CompactSpaceHeader> = unsafe { ObjPtr::new_from_addr(0x0) };
-    let merkle_header: ObjPtr<MerkleHeader> = unsafe { ObjPtr::new_from_addr(CompactSpaceHeader::MSIZE) };
 
     mem_meta.write(
         compact_header.addr(),
         &shale::compact::CompactSpaceHeader::new(RESERVED, RESERVED).dehydrate(),
     );
-    mem_meta.write(merkle_header.addr(), &MerkleHeader::new_empty().dehydrate());
 
-    let (compact_header, merkle_header) = unsafe {
-        (
-            MummyObj::ptr_to_obj(mem_meta.as_ref(), compact_header, shale::compact::CompactHeader::MSIZE)
-                .unwrap(),
-            MummyObj::ptr_to_obj(mem_meta.as_ref(), merkle_header, MerkleHeader::MSIZE).unwrap(),
-        )
+    let compact_header = unsafe {
+        MummyObj::ptr_to_obj(mem_meta.as_ref(), compact_header, shale::compact::CompactHeader::MSIZE).unwrap()
     };
 
     let cache = shale::ObjCache::new(65536);
     let space = shale::compact::CompactSpace::new(mem_meta, mem_payload, compact_header, cache, 10, 16).unwrap();
-    Merkle::new(merkle_header, Box::new(space), false).unwrap()
+    let mut root = ObjPtr::null();
+    Merkle::init_root(&mut root, &space).unwrap();
+    MerkleSetup {
+        root,
+        merkle: Merkle::new(Box::new(space)),
+    }
 }
 
 fn merkle_build_test<K: AsRef<[u8]> + std::cmp::Ord + Clone, V: AsRef<[u8]> + Clone>(
     items: Vec<(K, V)>, meta_size: u64, compact_size: u64,
-) -> Merkle {
+) -> MerkleSetup {
     let mut merkle = merkle_setup_test(meta_size, compact_size);
     for (k, v) in items.iter() {
-        merkle.insert(k, v.as_ref().to_vec()).unwrap();
+        merkle.insert(k, v.as_ref().to_vec())
     }
     let merkle_root = &*merkle.root_hash();
     let items_copy = items.clone();
@@ -127,14 +149,14 @@ fn test_root_hash_reversed_deletions() {
         let mut dumps = Vec::new();
         for (k, v) in items.iter() {
             dumps.push(merkle.dump());
-            merkle.insert(k, v.to_vec()).unwrap();
+            merkle.insert(k, v.to_vec());
             hashes.push(merkle.root_hash());
         }
         hashes.pop();
         println!("----");
         let mut prev_dump = merkle.dump();
         for (((k, _), h), d) in items.iter().rev().zip(hashes.iter().rev()).zip(dumps.iter().rev()) {
-            merkle.remove(k).unwrap();
+            merkle.remove(k);
             let h0 = merkle.root_hash();
             if *h != h0 {
                 for (k, _) in items.iter() {
@@ -183,10 +205,10 @@ fn test_root_hash_random_deletions() {
         items_ordered.shuffle(&mut *rng.borrow_mut());
         let mut merkle = merkle_setup_test(0x100000, 0x100000);
         for (k, v) in items.iter() {
-            merkle.insert(k, v.to_vec()).unwrap();
+            merkle.insert(k, v.to_vec());
         }
         for (k, _) in items_ordered.into_iter() {
-            merkle.remove(&k).unwrap();
+            merkle.remove(&k);
             items.remove(&k);
             let h = triehash::trie_root::<keccak_hasher::KeccakHasher, Vec<_>, _, _>(items.iter().collect());
             let h0 = merkle.root_hash();

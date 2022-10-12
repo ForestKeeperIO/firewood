@@ -54,5 +54,6 @@ fn main() {
     {
         let db = DB::new("simple_db", &cfg.clone().truncate(false).build()).unwrap();
         print_states(&db);
+        //println!("{}", hex::encode(&*db.root_hash()));
     }
 }

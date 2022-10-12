@@ -3,6 +3,7 @@ use once_cell::unsync::OnceCell;
 use sha3::Digest;
 use shale::{MemStore, MummyItem, ObjPtr, ObjRef, ShaleError, ShaleStore};
 
+use std::cell::Cell;
 use std::fmt::Debug;
 
 const NBRANCH: usize = 16;
@@ -11,10 +12,11 @@ const NBRANCH: usize = 16;
 pub enum MerkleError {
     Shale(ShaleError),
     KeyNotFound,
+    ReadOnly,
 }
 
 #[derive(PartialEq, Eq, Clone)]
-pub struct Hash([u8; 32]);
+pub struct Hash(pub [u8; 32]);
 
 impl std::ops::Deref for Hash {
     type Target = [u8; 32];
@@ -31,40 +33,6 @@ impl MummyItem for Hash {
     }
     fn dehydrate(&self) -> Vec<u8> {
         self.0.to_vec()
-    }
-}
-
-pub struct MerkleHeader {
-    root: ObjPtr<Node>,
-}
-
-impl MerkleHeader {
-    pub const MSIZE: u64 = 8;
-
-    pub fn new_empty() -> Self {
-        Self { root: ObjPtr::null() }
-    }
-}
-
-impl MummyItem for MerkleHeader {
-    fn hydrate(addr: u64, mem: &dyn MemStore) -> Result<(u64, Self), ShaleError> {
-        let raw = mem.get_view(addr, Self::MSIZE).ok_or(ShaleError::LinearMemStoreError)?;
-        let root = u64::from_le_bytes(raw[..8].try_into().unwrap());
-        unsafe {
-            Ok((
-                Self::MSIZE,
-                Self {
-                    root: ObjPtr::new_from_addr(root),
-                },
-            ))
-        }
-    }
-
-    fn dehydrate(&self) -> Vec<u8> {
-        let mut m = Vec::new();
-        m.extend(self.root.addr().to_le_bytes());
-        assert_eq!(m.len() as u64, Self::MSIZE);
-        m
     }
 }
 
@@ -188,16 +156,21 @@ impl BranchNode {
         (only_chd, has_chd)
     }
 
-    fn calc_eth_rlp(&self, store: &dyn ShaleStore<Node>) -> Vec<u8> {
+    fn calc_eth_rlp<T: ValueTransformer>(&self, store: &dyn ShaleStore<Node>) -> Vec<u8> {
         let mut stream = rlp::RlpStream::new_list(17);
         for c in self.chd.iter() {
             match c {
                 Some(c) => {
-                    let c_ref = store.get_item(*c).unwrap();
-                    if c_ref.eth_rlp_long {
-                        stream.append(&c_ref.root_hash.to_vec())
+                    let mut c_ref = store.get_item(*c).unwrap();
+                    if c_ref.get_eth_rlp_long::<T>(store) {
+                        let s = stream.append(&&(*c_ref.get_root_hash::<T>(store))[..]);
+                        if c_ref.lazy_dirty.get() {
+                            c_ref.write(|_| {}).unwrap();
+                            c_ref.lazy_dirty.set(false)
+                        }
+                        s
                     } else {
-                        let c_rlp = &c_ref.get_eth_rlp(store);
+                        let c_rlp = &c_ref.get_eth_rlp::<T>(store);
                         stream.append_raw(&c_rlp, 1)
                     }
                 }
@@ -222,8 +195,8 @@ impl Debug for LeafNode {
 }
 
 impl LeafNode {
-    fn calc_eth_rlp(&self) -> Vec<u8> {
-        rlp::encode_list::<Vec<u8>, _>(&[from_nibbles(&self.0.encode(true)).collect(), self.1.to_vec()]).into()
+    fn calc_eth_rlp<T: ValueTransformer>(&self) -> Vec<u8> {
+        rlp::encode_list::<Vec<u8>, _>(&[from_nibbles(&self.0.encode(true)).collect(), T::transform(&self.1)]).into()
     }
 }
 
@@ -237,14 +210,18 @@ impl Debug for ExtNode {
 }
 
 impl ExtNode {
-    fn calc_eth_rlp(&self, store: &dyn ShaleStore<Node>) -> Vec<u8> {
-        let r = store.get_item(self.1).unwrap();
+    fn calc_eth_rlp<T: ValueTransformer>(&self, store: &dyn ShaleStore<Node>) -> Vec<u8> {
+        let mut r = store.get_item(self.1).unwrap();
         let mut stream = rlp::RlpStream::new_list(2);
         stream.append(&from_nibbles(&self.0.encode(false)).collect::<Vec<_>>());
-        if r.eth_rlp_long {
-            stream.append(&r.root_hash.to_vec());
+        if r.get_eth_rlp_long::<T>(store) {
+            stream.append(&&(*r.get_root_hash::<T>(store))[..]);
+            if r.lazy_dirty.get() {
+                r.write(|_| {}).unwrap();
+                r.lazy_dirty.set(false)
+            }
         } else {
-            stream.append_raw(&r.get_eth_rlp(store), 1);
+            stream.append_raw(&r.get_eth_rlp::<T>(store), 1);
         }
         stream.out().into()
     }
@@ -252,9 +229,10 @@ impl ExtNode {
 
 #[derive(PartialEq, Eq, Clone)]
 pub struct Node {
-    root_hash: Hash,
-    eth_rlp_long: bool,
+    root_hash: OnceCell<Hash>,
+    eth_rlp_long: OnceCell<bool>,
     eth_rlp: OnceCell<Vec<u8>>,
+    lazy_dirty: Cell<bool>,
     inner: NodeType,
 }
 
@@ -266,11 +244,11 @@ enum NodeType {
 }
 
 impl NodeType {
-    fn calc_eth_rlp(&self, store: &dyn ShaleStore<Node>) -> Vec<u8> {
+    fn calc_eth_rlp<T: ValueTransformer>(&self, store: &dyn ShaleStore<Node>) -> Vec<u8> {
         let eth_rlp = match &self {
-            NodeType::Leaf(n) => n.calc_eth_rlp(),
-            NodeType::Extension(n) => n.calc_eth_rlp(store),
-            NodeType::Branch(n) => n.calc_eth_rlp(store),
+            NodeType::Leaf(n) => n.calc_eth_rlp::<T>(),
+            NodeType::Extension(n) => n.calc_eth_rlp::<T>(store),
+            NodeType::Branch(n) => n.calc_eth_rlp::<T>(store),
         };
         eth_rlp
     }
@@ -281,47 +259,75 @@ impl Node {
         const MAX_SIZE: OnceCell<u64> = OnceCell::new();
         *MAX_SIZE.get_or_init(|| {
             Self {
-                root_hash: Hash([0; 32]),
-                eth_rlp_long: false,
+                root_hash: OnceCell::new(),
+                eth_rlp_long: OnceCell::new(),
                 eth_rlp: OnceCell::new(),
                 inner: NodeType::Branch(BranchNode {
                     chd: [Some(ObjPtr::null()); NBRANCH],
                     value: Some(Data(Vec::new())),
                 }),
+                lazy_dirty: Cell::new(false),
             }
             .dehydrate()
             .len() as u64
         })
     }
 
-    fn get_eth_rlp(&self, store: &dyn ShaleStore<Node>) -> &[u8] {
-        self.eth_rlp.get_or_init(|| self.inner.calc_eth_rlp(store))
-    }
-    fn rehash(&mut self, store: &dyn ShaleStore<Node>) {
-        self.eth_rlp = OnceCell::new();
-        self.eth_rlp_long = self.get_eth_rlp(store).len() >= 32;
-        self.root_hash = Hash(sha3::Keccak256::digest(self.get_eth_rlp(store)).into());
+    fn get_eth_rlp<T: ValueTransformer>(&self, store: &dyn ShaleStore<Node>) -> &[u8] {
+        self.eth_rlp.get_or_init(|| self.inner.calc_eth_rlp::<T>(store))
     }
 
-    fn new(inner: NodeType, store: &dyn ShaleStore<Node>) -> Self {
+    fn get_root_hash<T: ValueTransformer>(&self, store: &dyn ShaleStore<Node>) -> &Hash {
+        self.root_hash.get_or_init(|| {
+            self.lazy_dirty.set(true);
+            Hash(sha3::Keccak256::digest(self.get_eth_rlp::<T>(store)).into())
+        })
+    }
+
+    fn get_eth_rlp_long<T: ValueTransformer>(&self, store: &dyn ShaleStore<Node>) -> bool {
+        *self.eth_rlp_long.get_or_init(|| {
+            self.lazy_dirty.set(true);
+            self.get_eth_rlp::<T>(store).len() >= 32
+        })
+    }
+
+    fn rehash(&mut self) {
+        self.eth_rlp = OnceCell::new();
+        self.eth_rlp_long = OnceCell::new();
+        self.root_hash = OnceCell::new();
+    }
+
+    fn new(inner: NodeType) -> Self {
         let mut s = Self {
-            root_hash: Hash([0; 32]),
-            eth_rlp_long: false,
+            root_hash: OnceCell::new(),
+            eth_rlp_long: OnceCell::new(),
             eth_rlp: OnceCell::new(),
             inner,
+            lazy_dirty: Cell::new(false),
         };
-        s.rehash(store);
+        s.rehash();
         s
     }
 
-    fn new_from_hash(root_hash: Hash, eth_rlp_long: bool, inner: NodeType) -> Self {
+    fn new_from_hash(root_hash: Option<Hash>, eth_rlp_long: Option<bool>, inner: NodeType) -> Self {
         Self {
-            root_hash,
-            eth_rlp_long,
+            root_hash: match root_hash {
+                Some(h) => OnceCell::with_value(h),
+                None => OnceCell::new(),
+            },
+            eth_rlp_long: match eth_rlp_long {
+                Some(b) => OnceCell::with_value(b),
+                None => OnceCell::new(),
+            },
             eth_rlp: OnceCell::new(),
             inner,
+            lazy_dirty: Cell::new(false),
         }
     }
+
+    const ROOT_HASH_VALID_BIT: u8 = 1 << 0;
+    const ETH_RLP_LONG_VALID_BIT: u8 = 1 << 1;
+    const ETH_RLP_LONG_BIT: u8 = 1 << 2;
 }
 
 impl MummyItem for Node {
@@ -329,8 +335,17 @@ impl MummyItem for Node {
         let dec_err = |_| ShaleError::DecodeError;
         const META_SIZE: u64 = 32 + 1 + 8;
         let meta_raw = mem.get_view(addr, META_SIZE).ok_or(ShaleError::LinearMemStoreError)?;
-        let root_hash = Hash(meta_raw[0..32].try_into().map_err(dec_err)?);
-        let eth_rlp_long = meta_raw[32] == 1;
+        let attrs = meta_raw[32];
+        let root_hash = if attrs & Node::ROOT_HASH_VALID_BIT == 0 {
+            None
+        } else {
+            Some(Hash(meta_raw[0..32].try_into().map_err(dec_err)?))
+        };
+        let eth_rlp_long = if attrs & Node::ETH_RLP_LONG_VALID_BIT == 0 {
+            None
+        } else {
+            Some(attrs & Node::ETH_RLP_LONG_BIT != 0)
+        };
         let len = u64::from_le_bytes(meta_raw[33..].try_into().map_err(dec_err)?);
         let obj_len = META_SIZE + len;
 
@@ -419,8 +434,22 @@ impl MummyItem for Node {
         }
         let mut m = Vec::new();
         let rlp_encoded = rlp::encode_list::<Vec<u8>, _>(&items);
-        m.extend(self.root_hash.iter());
-        m.push(if self.eth_rlp_long { 1 } else { 0 });
+        let mut attrs = 0;
+        attrs |= match self.root_hash.get() {
+            Some(h) => {
+                m.extend(h.0);
+                Node::ROOT_HASH_VALID_BIT
+            }
+            None => {
+                m.resize(m.len() + 32, 0);
+                0
+            }
+        };
+        attrs |= match self.eth_rlp_long.get() {
+            Some(b) => (if *b { Node::ETH_RLP_LONG_BIT } else { 0 } | Node::ETH_RLP_LONG_VALID_BIT),
+            None => 0,
+        };
+        m.push(attrs);
         m.extend((rlp_encoded.len() as u64).to_le_bytes().to_vec());
         m.extend(rlp_encoded);
         m
@@ -445,30 +474,26 @@ fn test_merkle_node_encoding() {
     }
     for node in [
         Node::new_from_hash(
-            Hash([0x0; 32]),
-            true,
+            None,
+            None,
             NodeType::Leaf(LeafNode(PartialPath(vec![0x1, 0x2, 0x3]), Data(vec![0x4, 0x5]))),
         ),
         Node::new_from_hash(
-            Hash([0x1; 32]),
-            false,
+            None,
+            None,
             NodeType::Extension(ExtNode(PartialPath(vec![0x1, 0x2, 0x3]), unsafe {
                 ObjPtr::new_from_addr(0x42)
             })),
         ),
         Node::new_from_hash(
-            Hash([0xf; 32]),
-            true,
+            None,
+            None,
             NodeType::Branch(BranchNode {
                 chd: chd0,
                 value: Some(Data("hello, world!".as_bytes().to_vec())),
             }),
         ),
-        Node::new_from_hash(
-            Hash([0xf; 32]),
-            false,
-            NodeType::Branch(BranchNode { chd: chd1, value: None }),
-        ),
+        Node::new_from_hash(None, None, NodeType::Branch(BranchNode { chd: chd1, value: None })),
     ] {
         check(node)
     }
@@ -488,7 +513,6 @@ macro_rules! write_node {
 }
 
 pub struct Merkle {
-    header: shale::Obj<MerkleHeader>,
     store: Box<dyn ShaleStore<Node>>,
 }
 
@@ -505,32 +529,17 @@ impl Merkle {
 }
 
 impl Merkle {
-    pub fn new(
-        mut header: shale::Obj<MerkleHeader>, store: Box<dyn ShaleStore<Node>>, read_only: bool,
-    ) -> Option<Self> {
-        // FIXME move out the store ownership and use configurable parameter
-        if header.root.is_null() {
-            if read_only {
-                return None
-            }
-            // create the sentinel node
-            header
-                .write(|r| Self::init_root(&mut r.root, store.as_ref()).unwrap())
-                .unwrap();
-        }
-        Some(Self { header, store })
+    pub fn new(store: Box<dyn ShaleStore<Node>>) -> Self {
+        Self { store }
     }
 
     pub fn init_root(root: &mut ObjPtr<Node>, store: &dyn ShaleStore<Node>) -> Result<(), MerkleError> {
         Ok(*root = store
             .put_item(
-                Node::new(
-                    NodeType::Branch(BranchNode {
-                        chd: [None; NBRANCH],
-                        value: None,
-                    }),
-                    store,
-                ),
+                Node::new(NodeType::Branch(BranchNode {
+                    chd: [None; NBRANCH],
+                    value: None,
+                })),
                 Node::max_branch_node_size(),
             )
             .map_err(MerkleError::Shale)?
@@ -541,7 +550,7 @@ impl Merkle {
         self.store.as_ref()
     }
 
-    fn empty_root() -> &'static Hash {
+    pub fn empty_root() -> &'static Hash {
         use once_cell::sync::OnceCell;
         static V: OnceCell<Hash> = OnceCell::new();
         V.get_or_init(|| {
@@ -554,19 +563,34 @@ impl Merkle {
         })
     }
 
-    pub fn root_hash(&self) -> Hash {
-        let root = self.get_node(self.header.root).unwrap().inner.as_branch().unwrap().chd[0];
-        if let Some(root) = root {
-            self.get_node(root).unwrap().root_hash.clone()
+    pub fn root_hash<T: ValueTransformer>(&self, root: ObjPtr<Node>) -> Result<Hash, MerkleError> {
+        let root = self.get_node(root).unwrap().inner.as_branch().unwrap().chd[0];
+        Ok(if let Some(root) = root {
+            let mut node = self.get_node(root)?;
+            let res = node.get_root_hash::<T>(self.store.as_ref()).clone();
+            if node.lazy_dirty.get() {
+                node.write(|_| {}).unwrap();
+                node.lazy_dirty.set(false)
+            }
+            res
         } else {
             Self::empty_root().clone()
-        }
+        })
     }
 
     fn dump_(&self, u: ObjPtr<Node>, output: &mut String) {
         use std::fmt::Write;
         let u_ref = self.get_node(u).unwrap();
-        write!(output, "{} => {}: ", u, hex::encode(&*u_ref.root_hash)).unwrap();
+        write!(
+            output,
+            "{} => {}: ",
+            u,
+            match u_ref.root_hash.get() {
+                Some(h) => hex::encode(&**h),
+                None => "<lazy>".to_string(),
+            }
+        )
+        .unwrap();
         match &u_ref.inner {
             NodeType::Branch(n) => {
                 writeln!(output, "{:?}", n).unwrap();
@@ -584,8 +608,7 @@ impl Merkle {
         }
     }
 
-    pub fn dump(&self) -> String {
-        let root = self.header.root;
+    pub fn dump(&self, root: ObjPtr<Node>) -> String {
         if root.is_null() {
             "<Empty>".to_string()
         } else {
@@ -604,7 +627,7 @@ impl Merkle {
                     NodeType::Extension(pp) => pp.1 = new_chd,
                     _ => unreachable!(),
                 }
-                p.rehash(self.store.as_ref());
+                p.rehash();
             })
             .unwrap();
     }
@@ -627,14 +650,14 @@ impl Merkle {
                             NodeType::Extension(u) => &mut u.0,
                             _ => unreachable!(),
                         }) = PartialPath(n_path[idx + 1..].to_vec());
-                        u.rehash(self.store.as_ref());
+                        u.rehash();
                     })
                     .unwrap();
                 let leaf_ptr = self
-                    .new_node(Node::new(
-                        NodeType::Leaf(LeafNode(PartialPath(rem_path[idx + 1..].to_vec()), Data(val))),
-                        self.store.as_ref(),
-                    ))?
+                    .new_node(Node::new(NodeType::Leaf(LeafNode(
+                        PartialPath(rem_path[idx + 1..].to_vec()),
+                        Data(val),
+                    ))))?
                     .as_ptr();
                 let mut chd = [None; NBRANCH];
                 chd[rem_path[idx] as usize] = Some(leaf_ptr);
@@ -651,12 +674,12 @@ impl Merkle {
                 });
                 drop(u_ref);
                 let t = NodeType::Branch(BranchNode { chd, value: None });
-                let branch_ptr = self.new_node(Node::new(t, self.store.as_ref()))?.as_ptr();
+                let branch_ptr = self.new_node(Node::new(t))?.as_ptr();
                 if idx > 0 {
-                    self.new_node(Node::new(
-                        NodeType::Extension(ExtNode(PartialPath(rem_path[..idx].to_vec()), branch_ptr)),
-                        self.store.as_ref(),
-                    ))?
+                    self.new_node(Node::new(NodeType::Extension(ExtNode(
+                        PartialPath(rem_path[..idx].to_vec()),
+                        branch_ptr,
+                    ))))?
                     .as_ptr()
                 } else {
                     branch_ptr
@@ -674,7 +697,7 @@ impl Merkle {
                                     let mut b_ref = self.get_node(u.1).unwrap();
                                     if let None = b_ref.write(|b| {
                                         b.inner.as_branch_mut().unwrap().value = Some(Data(val));
-                                        b.rehash(self.store.as_ref())
+                                        b.rehash()
                                     }) {
                                         u.1 = self.new_node(b_ref.clone()).unwrap().as_ptr();
                                         deleted.push(b_ref.as_ptr());
@@ -682,7 +705,7 @@ impl Merkle {
                                 }
                                 _ => unreachable!(),
                             }
-                            u.rehash(self.store.as_ref());
+                            u.rehash();
                         },
                         parents,
                         deleted
@@ -698,7 +721,7 @@ impl Merkle {
                                 NodeType::Extension(u) => &mut u.0,
                                 _ => unreachable!(),
                             }) = PartialPath(n_path[rem_path.len() + 1..].to_vec());
-                            u.rehash(self.store.as_ref());
+                            u.rehash();
                         })
                         .unwrap();
                     (
@@ -723,10 +746,10 @@ impl Merkle {
                         // this case does not apply to an extension node, resume the tree walk
                         return Ok(Some(val))
                     }
-                    let leaf = self.new_node(Node::new(
-                        NodeType::Leaf(LeafNode(PartialPath(rem_path[n_path.len() + 1..].to_vec()), Data(val))),
-                        self.store.as_ref(),
-                    ))?;
+                    let leaf = self.new_node(Node::new(NodeType::Leaf(LeafNode(
+                        PartialPath(rem_path[n_path.len() + 1..].to_vec()),
+                        Data(val),
+                    ))))?;
                     deleted.push(u_ptr);
                     (leaf.as_ptr(), &n_path[..], rem_path[n_path.len()], n_value)
                 };
@@ -735,16 +758,13 @@ impl Merkle {
                 let mut chd = [None; NBRANCH];
                 chd[idx as usize] = Some(leaf_ptr);
                 let branch_ptr = self
-                    .new_node(Node::new(
-                        NodeType::Branch(BranchNode { chd, value: v }),
-                        self.store.as_ref(),
-                    ))?
+                    .new_node(Node::new(NodeType::Branch(BranchNode { chd, value: v })))?
                     .as_ptr();
                 if prefix.len() > 0 {
-                    self.new_node(Node::new(
-                        NodeType::Extension(ExtNode(PartialPath(prefix.to_vec()), branch_ptr)),
-                        self.store.as_ref(),
-                    ))?
+                    self.new_node(Node::new(NodeType::Extension(ExtNode(
+                        PartialPath(prefix.to_vec()),
+                        branch_ptr,
+                    ))))?
                     .as_ptr()
                 } else {
                     branch_ptr
@@ -758,9 +778,7 @@ impl Merkle {
         Ok(None)
     }
 
-    pub fn insert_with_root<K: AsRef<[u8]>>(
-        &mut self, key: K, val: Vec<u8>, root: ObjPtr<Node>,
-    ) -> Result<(), MerkleError> {
+    pub fn insert<K: AsRef<[u8]>>(&mut self, key: K, val: Vec<u8>, root: ObjPtr<Node>) -> Result<(), MerkleError> {
         let mut deleted = Vec::new();
         let mut chunks = vec![0];
         chunks.extend(to_nibbles(key.as_ref()));
@@ -781,13 +799,10 @@ impl Merkle {
                     None => {
                         // insert the leaf to the empty slot
                         let leaf_ptr = self
-                            .new_node(Node::new(
-                                NodeType::Leaf(LeafNode(
-                                    PartialPath(chunks[i + 1..].to_vec()),
-                                    Data(val.take().unwrap()),
-                                )),
-                                self.store.as_ref(),
-                            ))?
+                            .new_node(Node::new(NodeType::Leaf(LeafNode(
+                                PartialPath(chunks[i + 1..].to_vec()),
+                                Data(val.take().unwrap()),
+                            ))))?
                             .as_ptr();
                         write_node!(
                             self,
@@ -795,7 +810,7 @@ impl Merkle {
                             |u| {
                                 let uu = u.inner.as_branch_mut().unwrap();
                                 uu.chd[*nib as usize] = Some(leaf_ptr);
-                                u.rehash(self.store.as_ref());
+                                u.rehash();
                             },
                             &mut parents,
                             &mut deleted
@@ -862,7 +877,7 @@ impl Merkle {
                                 } else {
                                     let idx = n.0[0];
                                     n.0 = PartialPath(n.0[1..].to_vec());
-                                    u.rehash(self.store.as_ref());
+                                    u.rehash();
                                     Some((idx, true, None))
                                 }
                             }
@@ -877,7 +892,7 @@ impl Merkle {
                                 Some((idx, more, Some(n.1)))
                             }
                         };
-                        u.rehash(self.store.as_ref())
+                        u.rehash()
                     },
                     &mut parents,
                     &mut deleted
@@ -895,13 +910,10 @@ impl Merkle {
                 };
                 chd[idx as usize] = Some(c_ptr);
                 let branch = self
-                    .new_node(Node::new(
-                        NodeType::Branch(BranchNode {
-                            chd,
-                            value: Some(Data(val.take().unwrap())),
-                        }),
-                        self.store.as_ref(),
-                    ))
+                    .new_node(Node::new(NodeType::Branch(BranchNode {
+                        chd,
+                        value: Some(Data(val.take().unwrap())),
+                    })))
                     .unwrap()
                     .as_ptr();
                 self.set_parent(branch, &mut parents);
@@ -911,17 +923,13 @@ impl Merkle {
         drop(u_ref);
 
         for (mut r, _) in parents.into_iter().rev() {
-            r.write(|u| u.rehash(self.store.as_ref())).unwrap();
+            r.write(|u| u.rehash()).unwrap();
         }
 
         for ptr in deleted.into_iter() {
             self.free_node(ptr)?
         }
         Ok(())
-    }
-
-    pub fn insert<K: AsRef<[u8]>>(&mut self, key: K, val: Vec<u8>) -> Result<(), MerkleError> {
-        self.insert_with_root(key, val, self.header.root)
     }
 
     fn after_remove_leaf<'b>(
@@ -933,7 +941,7 @@ impl Merkle {
             b_ref
                 .write(|b| {
                     b.inner.as_branch_mut().unwrap().chd[b_idx as usize] = None;
-                    b.rehash(self.store.as_ref())
+                    b.rehash()
                 })
                 .unwrap();
             let b_inner = b_ref.inner.as_branch().unwrap();
@@ -952,10 +960,7 @@ impl Merkle {
                     // from: [p: Branch] -> [b (v)]x -> [Leaf]x
                     // to: [p: Branch] -> [Leaf (v)]
                     let leaf = self
-                        .new_node(Node::new(
-                            NodeType::Leaf(LeafNode(PartialPath(Vec::new()), val)),
-                            self.store.as_ref(),
-                        ))
+                        .new_node(Node::new(NodeType::Leaf(LeafNode(PartialPath(Vec::new()), val))))
                         .unwrap()
                         .as_ptr();
                     write_node!(
@@ -963,7 +968,7 @@ impl Merkle {
                         p_ref,
                         |p| {
                             p.inner.as_branch_mut().unwrap().chd[p_idx as usize] = Some(leaf);
-                            p.rehash(self.store.as_ref())
+                            p.rehash()
                         },
                         parents,
                         deleted
@@ -973,10 +978,10 @@ impl Merkle {
                     // from: P -> [p: Ext]x -> [b (v)]x -> [leaf]x
                     // to: P -> [Leaf (v)]
                     let leaf = self
-                        .new_node(Node::new(
-                            NodeType::Leaf(LeafNode(PartialPath(n.0.clone().into_inner()), val)),
-                            self.store.as_ref(),
-                        ))
+                        .new_node(Node::new(NodeType::Leaf(LeafNode(
+                            PartialPath(n.0.clone().into_inner()),
+                            val,
+                        ))))
                         .unwrap()
                         .as_ptr();
                     deleted.push(p_ptr);
@@ -998,10 +1003,7 @@ impl Merkle {
                             //                           \____[Leaf]x
                             // to: [p: Branch] -> [Ext] -> [Branch]
                             let ext = self
-                                .new_node(Node::new(
-                                    NodeType::Extension(ExtNode(PartialPath(vec![idx]), c_ptr)),
-                                    self.store.as_ref(),
-                                ))?
+                                .new_node(Node::new(NodeType::Extension(ExtNode(PartialPath(vec![idx]), c_ptr))))?
                                 .as_ptr();
                             self.set_parent(ext, &mut [(p_ref, p_idx)]);
                         }
@@ -1018,7 +1020,7 @@ impl Merkle {
                                     let mut pp = p.inner.as_extension_mut().unwrap();
                                     pp.0 .0.push(idx);
                                     pp.1 = c_ptr;
-                                    p.rehash(self.store.as_ref());
+                                    p.rehash();
                                 },
                                 parents,
                                 deleted
@@ -1043,7 +1045,7 @@ impl Merkle {
                                 })
                                 .0
                                 .insert(0, idx);
-                                c.rehash(self.store.as_ref())
+                                c.rehash()
                             }) {
                                 deleted.push(c_ptr);
                                 self.new_node(c_ref.clone())?.as_ptr()
@@ -1056,7 +1058,7 @@ impl Merkle {
                                 p_ref,
                                 |p| {
                                     p.inner.as_branch_mut().unwrap().chd[p_idx as usize] = Some(c_ptr);
-                                    p.rehash(self.store.as_ref())
+                                    p.rehash()
                                 },
                                 parents,
                                 deleted
@@ -1082,7 +1084,7 @@ impl Merkle {
                                     };
                                     path.extend(&**path0);
                                     *path0 = PartialPath(path);
-                                    c.rehash(self.store.as_ref())
+                                    c.rehash()
                                 },
                                 parents,
                                 deleted
@@ -1118,10 +1120,10 @@ impl Merkle {
                                 // from: [Branch] -> [Branch]x -> [Branch]
                                 // to: [Branch] -> [Ext] -> [Branch]
                                 n.chd[b_idx as usize] = Some(
-                                    self.new_node(Node::new(
-                                        NodeType::Extension(ExtNode(PartialPath(vec![idx]), c_ptr)),
-                                        self.store.as_ref(),
-                                    ))
+                                    self.new_node(Node::new(NodeType::Extension(ExtNode(
+                                        PartialPath(vec![idx]),
+                                        c_ptr,
+                                    ))))
                                     .unwrap()
                                     .as_ptr(),
                                 );
@@ -1134,7 +1136,7 @@ impl Merkle {
                             }
                             _ => unreachable!(),
                         }
-                        b.rehash(self.store.as_ref())
+                        b.rehash()
                     },
                     parents,
                     deleted
@@ -1152,7 +1154,7 @@ impl Merkle {
                         }
                         .0
                         .insert(0, idx);
-                        c.rehash(self.store.as_ref())
+                        c.rehash()
                     }) {
                         deleted.push(c_ptr);
                         self.new_node(c_ref.clone())?.as_ptr()
@@ -1165,7 +1167,7 @@ impl Merkle {
                         b_ref,
                         |b| {
                             b.inner.as_branch_mut().unwrap().chd[b_idx as usize] = Some(c_ptr);
-                            b.rehash(self.store.as_ref())
+                            b.rehash()
                         },
                         parents,
                         deleted
@@ -1184,7 +1186,7 @@ impl Merkle {
                         };
                         path.extend(&**path0);
                         *path0 = PartialPath(path);
-                        c.rehash(self.store.as_ref())
+                        c.rehash()
                     }) {
                         deleted.push(c_ptr);
                         self.new_node(c_ref.clone())?.as_ptr()
@@ -1201,8 +1203,7 @@ impl Merkle {
         Ok(())
     }
 
-    pub fn remove<K: AsRef<[u8]>>(&mut self, key: K) -> Result<bool, MerkleError> {
-        let root = self.header.root;
+    pub fn remove<K: AsRef<[u8]>>(&mut self, key: K, root: ObjPtr<Node>) -> Result<bool, MerkleError> {
         let mut chunks = vec![0];
         chunks.extend(to_nibbles(key.as_ref()));
 
@@ -1259,7 +1260,7 @@ impl Merkle {
                     u_ref
                         .write(|u| {
                             u.inner.as_branch_mut().unwrap().value = None;
-                            u.rehash(self.store.as_ref())
+                            u.rehash()
                         })
                         .unwrap();
                     found = true;
@@ -1283,7 +1284,7 @@ impl Merkle {
         drop(u_ref);
 
         for (mut r, _) in parents.into_iter().rev() {
-            r.write(|u| u.rehash(self.store.as_ref())).unwrap();
+            r.write(|u| u.rehash()).unwrap();
         }
 
         for ptr in deleted.into_iter() {
@@ -1292,7 +1293,7 @@ impl Merkle {
         Ok(found)
     }
 
-    pub fn get_mut_with_root(&mut self, key: &[u8], root: ObjPtr<Node>) -> Result<RefMut, MerkleError> {
+    pub fn get_mut(&mut self, key: &[u8], root: ObjPtr<Node>) -> Result<RefMut, MerkleError> {
         let mut chunks = vec![0];
         chunks.extend(to_nibbles(key.as_ref()));
         let mut parents = Vec::new();
@@ -1356,11 +1357,7 @@ impl Merkle {
         Err(MerkleError::KeyNotFound)
     }
 
-    pub fn get_mut(&mut self, key: &[u8]) -> Result<RefMut, MerkleError> {
-        self.get_mut_with_root(key, self.header.root)
-    }
-
-    pub fn get_with_root(&self, key: &[u8], root: ObjPtr<Node>) -> Result<Ref, MerkleError> {
+    pub fn get(&self, key: &[u8], root: ObjPtr<Node>) -> Result<Ref, MerkleError> {
         let mut chunks = vec![0];
         chunks.extend(to_nibbles(key.as_ref()));
 
@@ -1416,10 +1413,6 @@ impl Merkle {
 
         Err(MerkleError::KeyNotFound)
     }
-
-    pub fn get(&self, key: &[u8]) -> Result<Ref, MerkleError> {
-        self.get_with_root(key, self.header.root)
-    }
 }
 
 pub struct Ref<'a>(ObjRef<'a, Node>);
@@ -1468,7 +1461,7 @@ impl<'a> RefMut<'a> {
                         NodeType::Leaf(n) => &mut n.1 .0,
                         _ => unreachable!(),
                     });
-                    u.rehash(self.merkle.store.as_ref())
+                    u.rehash()
                 },
                 &mut parents,
                 &mut deleted
@@ -1478,6 +1471,18 @@ impl<'a> RefMut<'a> {
             self.merkle.free_node(ptr)?;
         }
         Ok(())
+    }
+}
+
+pub trait ValueTransformer {
+    fn transform(bytes: &[u8]) -> Vec<u8>;
+}
+
+pub struct IdTrans;
+
+impl ValueTransformer for IdTrans {
+    fn transform(bytes: &[u8]) -> Vec<u8> {
+        bytes.to_vec()
     }
 }
 

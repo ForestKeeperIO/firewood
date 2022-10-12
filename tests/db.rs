@@ -43,25 +43,26 @@ fn test_revisions() {
                 for _ in 0..m {
                     let key = keygen();
                     let val: Vec<u8> = (0..8).map(|_| rng.borrow_mut().gen()).collect();
-                    wb.insert(key, val.to_vec()).unwrap();
+                    wb.kv_insert(key, val.to_vec()).unwrap();
                 }
+                wb.kv_root_hash().unwrap();
                 wb.commit();
             }
             while dumped.len() > 10 {
                 dumped.pop_back();
             }
-            dumped.push_front(db.dump());
+            dumped.push_front(db.kv_dump());
             for i in 1..dumped.len() {
                 let rev = db.get_revision(i, None).unwrap();
-                assert_eq!(rev.dump(), dumped[i]);
+                assert_eq!(rev.kv_dump(), dumped[i]);
             }
         }
         drop(db);
         let db = DB::new("test_revisions_db", &cfg.clone().truncate(false).build()).unwrap();
-        for i in 1..dumped.len() {
-            let rev = db.get_revision(i, None).unwrap();
-            assert_eq!(rev.dump(), dumped[i]);
+        for j in 1..dumped.len() {
+            let rev = db.get_revision(j, None).unwrap();
+            assert_eq!(rev.kv_dump(), dumped[j]);
         }
-        println!("i = {}", i);
+        println!("i = {}\n{}", i, dumped[0]);
     }
 }
