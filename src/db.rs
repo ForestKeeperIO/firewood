@@ -41,7 +41,7 @@ struct DBHeader {
 
 #[derive(TypedBuilder, Clone)]
 pub struct DBRevConfig {
-    #[builder(default = 65536)]
+    #[builder(default = 1 << 20)]
     merkle_ncached_objs: usize,
     #[builder(default = 4096)]
     blob_ncached_objs: usize,

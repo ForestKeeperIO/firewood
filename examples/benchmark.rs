@@ -19,9 +19,9 @@ fn main() {
     let args = Args::parse();
 
     let cfg = DBConfig::builder()
-        .meta_ncached_pages(1024)
+        .meta_ncached_pages(65536)
         .meta_ncached_files(128)
-        .compact_ncached_pages(1024)
+        .compact_ncached_pages(262144)
         .compact_ncached_files(128)
         .wal(WALConfig::builder().max_revisions(10).build());
     {

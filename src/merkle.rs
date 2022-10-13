@@ -360,9 +360,9 @@ impl MummyItem for Node {
         if items.len() == NBRANCH + 1 {
             let mut chd = [None; NBRANCH];
             for (i, c) in items[..NBRANCH].iter().enumerate() {
-                if c.len() > 0 {
-                    chd[i] =
-                        Some(unsafe { ObjPtr::new_from_addr(u64::from_le_bytes(c[..8].try_into().map_err(dec_err)?)) })
+                let addr = u64::from_le_bytes(c[..8].try_into().map_err(dec_err)?);
+                if addr != 0 {
+                    chd[i] = Some(unsafe { ObjPtr::new_from_addr(addr) })
                 }
             }
             Ok((
@@ -414,7 +414,7 @@ impl MummyItem for Node {
                 for c in n.chd.iter() {
                     items.push(match c {
                         Some(p) => p.addr().to_le_bytes().to_vec(),
-                        None => Vec::new(),
+                        None => 0u64.to_le_bytes().to_vec(),
                     });
                 }
                 items.push(match &n.value {
@@ -804,17 +804,12 @@ impl Merkle {
                                 Data(val.take().unwrap()),
                             ))))?
                             .as_ptr();
-                        write_node!(
-                            self,
-                            u,
-                            |u| {
-                                let uu = u.inner.as_branch_mut().unwrap();
-                                uu.chd[*nib as usize] = Some(leaf_ptr);
-                                u.rehash();
-                            },
-                            &mut parents,
-                            &mut deleted
-                        );
+                        u.write(|u| {
+                            let uu = u.inner.as_branch_mut().unwrap();
+                            uu.chd[*nib as usize] = Some(leaf_ptr);
+                            u.rehash();
+                        })
+                        .unwrap();
                         break
                     }
                 },
@@ -963,16 +958,12 @@ impl Merkle {
                         .new_node(Node::new(NodeType::Leaf(LeafNode(PartialPath(Vec::new()), val))))
                         .unwrap()
                         .as_ptr();
-                    write_node!(
-                        self,
-                        p_ref,
-                        |p| {
+                    p_ref
+                        .write(|p| {
                             p.inner.as_branch_mut().unwrap().chd[p_idx as usize] = Some(leaf);
                             p.rehash()
-                        },
-                        parents,
-                        deleted
-                    );
+                        })
+                        .unwrap();
                 }
                 NodeType::Extension(n) => {
                     // from: P -> [p: Ext]x -> [b (v)]x -> [leaf]x
@@ -1053,16 +1044,12 @@ impl Merkle {
                                 c_ptr
                             };
                             drop(c_ref);
-                            write_node!(
-                                self,
-                                p_ref,
-                                |p| {
+                            p_ref
+                                .write(|p| {
                                     p.inner.as_branch_mut().unwrap().chd[p_idx as usize] = Some(c_ptr);
                                     p.rehash()
-                                },
-                                parents,
-                                deleted
-                            );
+                                })
+                                .unwrap();
                         }
                         NodeType::Extension(n) => {
                             //                               ____[Leaf/Ext]
@@ -1162,16 +1149,12 @@ impl Merkle {
                         c_ptr
                     };
                     drop(c_ref);
-                    write_node!(
-                        self,
-                        b_ref,
-                        |b| {
+                    b_ref
+                        .write(|b| {
                             b.inner.as_branch_mut().unwrap().chd[b_idx as usize] = Some(c_ptr);
                             b.rehash()
-                        },
-                        parents,
-                        deleted
-                    );
+                        })
+                        .unwrap();
                 }
                 NodeType::Extension(n) => {
                     // from: P -> [Ext] -> [Branch]x -> [Leaf/Ext]

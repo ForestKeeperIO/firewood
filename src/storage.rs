@@ -13,7 +13,7 @@ use growthring::{
     WALStoreAIO,
 };
 use nix::fcntl::{flock, FlockArg};
-use shale::{MemStore, MemView, SpaceID};
+use shale::{MemInterval, MemStore, MemView, SpaceID};
 use tokio::sync::{mpsc, oneshot, Mutex, Semaphore};
 use typed_builder::TypedBuilder;
 
@@ -316,9 +316,13 @@ impl StoreRevShared {
 
 impl MemStore for StoreRevShared {
     fn get_view(&self, offset: u64, length: u64) -> Option<Box<dyn MemView>> {
-        let store = self.clone();
         let data = self.0.get_slice(offset, length)?;
-        Some(Box::new(StoreRef { data, offset, store }))
+        Some(Box::new(StoreRef { data }))
+    }
+
+    fn get_interval(&self, offset: u64, length: u64) -> Option<Box<dyn MemInterval>> {
+        let store = self.clone();
+        Some(Box::new(StoreInterval { store, offset, length }))
     }
 
     fn write(&self, _offset: u64, _change: &[u8]) {
@@ -331,25 +335,31 @@ impl MemStore for StoreRevShared {
     }
 }
 
-struct StoreRef<S: Clone + MemStore> {
+struct StoreRef {
     data: Vec<u8>,
-    offset: u64,
-    store: S,
 }
 
-impl<S: Clone + MemStore> std::ops::Deref for StoreRef<S> {
+impl std::ops::Deref for StoreRef {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
         &self.data
     }
 }
 
-impl<S: Clone + MemStore + 'static> MemView for StoreRef<S> {
+impl MemView for StoreRef {}
+
+struct StoreInterval<S: Clone + MemStore> {
+    offset: u64,
+    length: u64,
+    store: S,
+}
+
+impl<S: Clone + MemStore + 'static> MemInterval for StoreInterval<S> {
     fn mem_image(&self) -> &dyn MemStore {
         &self.store
     }
     fn get_interval(&self) -> (u64, u64) {
-        (self.offset, self.data.len() as u64)
+        (self.offset, self.length)
     }
 }
 
@@ -445,8 +455,12 @@ impl MemStore for StoreRevMut {
                 data
             }
         };
+        Some(Box::new(StoreRef { data }))
+    }
+
+    fn get_interval(&self, offset: u64, length: u64) -> Option<Box<dyn MemInterval>> {
         let store = self.clone();
-        Some(Box::new(StoreRef { data, offset, store }))
+        Some(Box::new(StoreInterval { store, offset, length }))
     }
 
     fn write(&self, offset: u64, mut change: &[u8]) {
