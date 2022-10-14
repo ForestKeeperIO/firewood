@@ -18,11 +18,11 @@ jobs:
         with:
           toolchain: nightly
           override: true
-          components: rustfmt
+          components: rustfmt, clippy
       - name: Lint
         run: cargo fmt && git diff --exit-code
       - name: Clippy
-        run: cargo clippy --fix && git diff --exit-code
+        run: cargo clippy --fix --no-deps && git diff --exit-code
 
   build:
     runs-on: ubuntu-latest

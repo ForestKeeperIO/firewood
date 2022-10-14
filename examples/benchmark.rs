@@ -27,7 +27,7 @@ fn main() {
     {
         use rand::{Rng, SeedableRng};
         let mut c = Criterion::default();
-        let mut group = c.benchmark_group(format!("insert"));
+        let mut group = c.benchmark_group("insert".to_string());
         let mut rng = rand::rngs::StdRng::seed_from_u64(args.seed);
         let nbatch = args.nbatch;
         let batch_size = args.batch_size;
