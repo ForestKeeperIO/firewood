@@ -52,7 +52,7 @@ fn main() {
         print_states(&db);
     }
     {
-        let db = DB::new("simple_db", &cfg.clone().truncate(false).build()).unwrap();
+        let db = DB::new("simple_db", &cfg.truncate(false).build()).unwrap();
         print_states(&db);
         //println!("{}", hex::encode(&*db.root_hash()));
     }
