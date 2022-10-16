@@ -1,10 +1,9 @@
 name: ci
 
 on:
-  push:
-    branches: [ "main" ]
   pull_request:
-    branches: [ "main" ]
+    branches: 
+      - "*"
 
 env:
   CARGO_TERM_COLOR: always
@@ -15,27 +14,36 @@ jobs:
 
     steps:
       - uses: actions/checkout@v3
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          override: true
+          components: rustfmt, clippy
       - name: Lint
         run: cargo fmt && git diff --exit-code
-
-      - uses: actions/checkout@v3
       - name: Clippy
-        run: cargo clippy --fix && git diff --exit-code
+        run: cargo clippy --fix --no-deps && git diff --exit-code
 
   build:
-    needs: lint
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v3
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          override: true
       - name: Build
         run: cargo build --verbose
 
   test:
-    needs: build
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v3
-      - name: Run tests 
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          override: true
+      - name: Run tests
         run: cargo test --verbose

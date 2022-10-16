@@ -162,7 +162,7 @@ fn test_root_hash_reversed_deletions() {
                 for (k, _) in items.iter() {
                     println!("{}", hex::encode(k));
                 }
-                println!("{} != {}", hex::encode(&**h), hex::encode(&*h0));
+                println!("{} != {}", hex::encode(**h), hex::encode(*h0));
                 println!("== before {} ===", hex::encode(k));
                 print!("{}", prev_dump);
                 println!("== after {} ===", hex::encode(k));
@@ -213,7 +213,7 @@ fn test_root_hash_random_deletions() {
             let h = triehash::trie_root::<keccak_hasher::KeccakHasher, Vec<_>, _, _>(items.iter().collect());
             let h0 = merkle.root_hash();
             if &h[..] != &*h0 {
-                println!("{} != {}", hex::encode(h), hex::encode(&*h0));
+                println!("{} != {}", hex::encode(h), hex::encode(*h0));
             }
         }
         println!("i = {}", i);
