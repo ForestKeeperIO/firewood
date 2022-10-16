@@ -1,5 +1,5 @@
 use firewood::merkle::*;
-use shale::{MemStore, MummyItem, MummyObj, ObjPtr};
+use shale::{MemStore, MummyObj, ObjPtr};
 use std::rc::Rc;
 
 struct MerkleSetup {
@@ -36,14 +36,14 @@ fn merkle_setup_test(meta_size: u64, compact_size: u64) -> MerkleSetup {
 
     mem_meta.write(
         compact_header.addr(),
-        &shale::compact::CompactSpaceHeader::new(RESERVED, RESERVED).dehydrate(),
+        &shale::to_dehydrated(&shale::compact::CompactSpaceHeader::new(RESERVED, RESERVED)),
     );
 
     let compact_header = unsafe {
         MummyObj::ptr_to_obj(mem_meta.as_ref(), compact_header, shale::compact::CompactHeader::MSIZE).unwrap()
     };
 
-    let cache = shale::ObjCache::new(65536);
+    let cache = shale::ObjCache::new(1);
     let space = shale::compact::CompactSpace::new(mem_meta, mem_payload, compact_header, cache, 10, 16).unwrap();
     let mut root = ObjPtr::null();
     Merkle::init_root(&mut root, &space).unwrap();

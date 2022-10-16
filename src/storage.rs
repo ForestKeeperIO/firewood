@@ -4,6 +4,7 @@ use std::cell::{RefCell, RefMut};
 use std::collections::HashMap;
 use std::fmt;
 use std::num::NonZeroUsize;
+use std::ops::Deref;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -13,7 +14,7 @@ use growthring::{
     WALStoreAIO,
 };
 use nix::fcntl::{flock, FlockArg};
-use shale::{MemInterval, MemStore, MemView, SpaceID};
+use shale::{MemStore, MemView, SpaceID};
 use tokio::sync::{mpsc, oneshot, Mutex, Semaphore};
 use typed_builder::TypedBuilder;
 
@@ -134,7 +135,7 @@ impl fmt::Debug for StoreDelta {
     }
 }
 
-impl std::ops::Deref for StoreDelta {
+impl Deref for StoreDelta {
     type Target = [DeltaPage];
     fn deref(&self) -> &[DeltaPage] {
         &self.0
@@ -320,9 +321,8 @@ impl MemStore for StoreRevShared {
         Some(Box::new(StoreRef { data }))
     }
 
-    fn get_interval(&self, offset: u64, length: u64) -> Option<Box<dyn MemInterval>> {
-        let store = self.clone();
-        Some(Box::new(StoreInterval { store, offset, length }))
+    fn get_shared(&self) -> Option<Box<dyn Deref<Target = dyn MemStore>>> {
+        Some(Box::new(StoreShared(self.clone())))
     }
 
     fn write(&self, _offset: u64, _change: &[u8]) {
@@ -339,7 +339,7 @@ struct StoreRef {
     data: Vec<u8>,
 }
 
-impl std::ops::Deref for StoreRef {
+impl Deref for StoreRef {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
         &self.data
@@ -348,18 +348,12 @@ impl std::ops::Deref for StoreRef {
 
 impl MemView for StoreRef {}
 
-struct StoreInterval<S: Clone + MemStore> {
-    offset: u64,
-    length: u64,
-    store: S,
-}
+struct StoreShared<S: Clone + MemStore>(S);
 
-impl<S: Clone + MemStore + 'static> MemInterval for StoreInterval<S> {
-    fn mem_image(&self) -> &dyn MemStore {
-        &self.store
-    }
-    fn get_interval(&self) -> (u64, u64) {
-        (self.offset, self.length)
+impl<S: Clone + MemStore + 'static> Deref for StoreShared<S> {
+    type Target = dyn MemStore;
+    fn deref(&self) -> &(dyn MemStore + 'static) {
+        &self.0
     }
 }
 
@@ -458,9 +452,8 @@ impl MemStore for StoreRevMut {
         Some(Box::new(StoreRef { data }))
     }
 
-    fn get_interval(&self, offset: u64, length: u64) -> Option<Box<dyn MemInterval>> {
-        let store = self.clone();
-        Some(Box::new(StoreInterval { store, offset, length }))
+    fn get_shared(&self) -> Option<Box<dyn Deref<Target = dyn MemStore>>> {
+        Some(Box::new(StoreShared(self.clone())))
     }
 
     fn write(&self, offset: u64, mut change: &[u8]) {
@@ -551,12 +544,12 @@ fn test_from_ash() {
         let z = Rc::new(ZeroStore::new());
         let rev = StoreRevShared::from_ash(z, &writes);
         println!("{:?}", rev);
-        assert_eq!(rev.get_view(min, max - min).unwrap().deref(), &canvas);
+        assert_eq!(&**rev.get_view(min, max - min).unwrap(), &canvas);
         for _ in 0..2 * n {
             let l = rng.gen_range(min..max);
             let r = rng.gen_range(l + 1..max);
             assert_eq!(
-                rev.get_view(l, r - l).unwrap().deref(),
+                &**rev.get_view(l, r - l).unwrap(),
                 &canvas[(l - min) as usize..(r - min) as usize]
             );
         }

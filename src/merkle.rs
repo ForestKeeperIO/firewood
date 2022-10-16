@@ -5,6 +5,7 @@ use shale::{MemStore, MummyItem, ObjPtr, ObjRef, ShaleError, ShaleStore};
 
 use std::cell::Cell;
 use std::fmt::Debug;
+use std::io::{Cursor, Read, Write};
 
 const NBRANCH: usize = 16;
 
@@ -18,6 +19,10 @@ pub enum MerkleError {
 #[derive(PartialEq, Eq, Clone)]
 pub struct Hash(pub [u8; 32]);
 
+impl Hash {
+    const MSIZE: u64 = 32;
+}
+
 impl std::ops::Deref for Hash {
     type Target = [u8; 32];
     fn deref(&self) -> &[u8; 32] {
@@ -26,13 +31,17 @@ impl std::ops::Deref for Hash {
 }
 
 impl MummyItem for Hash {
-    fn hydrate(addr: u64, mem: &dyn MemStore) -> Result<(u64, Self), ShaleError> {
-        const SIZE: u64 = 32;
-        let raw = mem.get_view(addr, SIZE).ok_or(ShaleError::LinearMemStoreError)?;
-        Ok((SIZE, Self(raw[..SIZE as usize].try_into().unwrap())))
+    fn hydrate(addr: u64, mem: &dyn MemStore) -> Result<Self, ShaleError> {
+        let raw = mem.get_view(addr, Self::MSIZE).ok_or(ShaleError::LinearMemStoreError)?;
+        Ok(Self(raw[..Self::MSIZE as usize].try_into().unwrap()))
     }
-    fn dehydrate(&self) -> Vec<u8> {
-        self.0.to_vec()
+
+    fn dehydrated_len(&self) -> u64 {
+        Self::MSIZE
+    }
+
+    fn dehydrate(&self, to: &mut [u8]) {
+        Cursor::new(to).write_all(&self.0).unwrap()
     }
 }
 
@@ -81,6 +90,15 @@ impl PartialPath {
             }),
             term,
         )
+    }
+
+    fn dehydrated_len(&self) -> u64 {
+        let len = self.0.len() as u64;
+        if len & 1 == 1 {
+            (len + 1) >> 1
+        } else {
+            (len >> 1) + 1
+        }
     }
 }
 
@@ -255,6 +273,10 @@ impl NodeType {
 }
 
 impl Node {
+    const BRANCH_NODE: u8 = 0x0;
+    const EXT_NODE: u8 = 0x1;
+    const LEAF_NODE: u8 = 0x2;
+
     fn max_branch_node_size() -> u64 {
         const MAX_SIZE: OnceCell<u64> = OnceCell::new();
         *MAX_SIZE.get_or_init(|| {
@@ -268,8 +290,7 @@ impl Node {
                 }),
                 lazy_dirty: Cell::new(false),
             }
-            .dehydrate()
-            .len() as u64
+            .dehydrated_len()
         })
     }
 
@@ -331,9 +352,9 @@ impl Node {
 }
 
 impl MummyItem for Node {
-    fn hydrate(addr: u64, mem: &dyn MemStore) -> Result<(u64, Self), ShaleError> {
+    fn hydrate(addr: u64, mem: &dyn MemStore) -> Result<Self, ShaleError> {
         let dec_err = |_| ShaleError::DecodeError;
-        const META_SIZE: u64 = 32 + 1 + 8;
+        const META_SIZE: u64 = 32 + 1 + 1;
         let meta_raw = mem.get_view(addr, META_SIZE).ok_or(ShaleError::LinearMemStoreError)?;
         let attrs = meta_raw[32];
         let root_hash = if attrs & Node::ROOT_HASH_VALID_BIT == 0 {
@@ -346,102 +367,118 @@ impl MummyItem for Node {
         } else {
             Some(attrs & Node::ETH_RLP_LONG_BIT != 0)
         };
-        let len = u64::from_le_bytes(meta_raw[33..].try_into().map_err(dec_err)?);
-        let obj_len = META_SIZE + len;
-
-        // this is different from geth due to the different addressing system, so pointer (8-byte)
-        // values are used in place of hashes to refer to a child node.
-
-        let rlp_raw = mem
-            .get_view(addr + META_SIZE, len)
-            .ok_or(ShaleError::LinearMemStoreError)?;
-        let items: Vec<Vec<u8>> = rlp::decode_list(&rlp_raw);
-
-        if items.len() == NBRANCH + 1 {
-            let mut chd = [None; NBRANCH];
-            for (i, c) in items[..NBRANCH].iter().enumerate() {
-                let addr = u64::from_le_bytes(c[..8].try_into().map_err(dec_err)?);
-                if addr != 0 {
-                    chd[i] = Some(unsafe { ObjPtr::new_from_addr(addr) })
+        match meta_raw[33] {
+            Self::BRANCH_NODE => {
+                let branch_header_size = NBRANCH as u64 * 8 + 4;
+                let node_raw = mem
+                    .get_view(addr + META_SIZE, branch_header_size)
+                    .ok_or(ShaleError::LinearMemStoreError)?;
+                let mut cur = Cursor::new(node_raw.deref());
+                let mut chd = [None; NBRANCH];
+                let mut buff = [0; 8];
+                for chd in chd.iter_mut() {
+                    cur.read_exact(&mut buff).map_err(|_| ShaleError::DecodeError)?;
+                    let addr = u64::from_le_bytes(buff);
+                    if addr != 0 {
+                        *chd = Some(unsafe { ObjPtr::new_from_addr(addr) })
+                    }
                 }
-            }
-            Ok((
-                obj_len,
-                Self::new_from_hash(
+                cur.read_exact(&mut buff[..4]).map_err(|_| ShaleError::DecodeError)?;
+                let raw_len = u32::from_le_bytes(buff[..4].try_into().map_err(dec_err)?) as u64;
+                let value = if raw_len == u32::MAX as u64 {
+                    None
+                } else {
+                    Some(Data(
+                        mem.get_view(addr + META_SIZE + branch_header_size, raw_len)
+                            .ok_or(ShaleError::LinearMemStoreError)?
+                            .to_vec(),
+                    ))
+                };
+                Ok(Self::new_from_hash(
                     root_hash,
                     eth_rlp_long,
-                    NodeType::Branch(BranchNode {
-                        chd,
-                        value: if items[NBRANCH].len() > 0 {
-                            Some(Data(items[NBRANCH].to_vec()))
-                        } else {
-                            None
-                        },
-                    }),
-                ),
-            ))
-        } else if items.len() == 2 {
-            let nibbles: Vec<_> = to_nibbles(&items[0]).collect();
-            let (path, term) = PartialPath::decode(nibbles);
-            Ok((
-                obj_len,
-                if term {
-                    Self::new_from_hash(
-                        root_hash,
-                        eth_rlp_long,
-                        NodeType::Leaf(LeafNode(path, Data(items[1].clone()))),
-                    )
-                } else {
-                    Self::new_from_hash(
-                        root_hash,
-                        eth_rlp_long,
-                        NodeType::Extension(ExtNode(path, unsafe {
-                            ObjPtr::new_from_addr(u64::from_le_bytes(items[1][..8].try_into().map_err(dec_err)?))
-                        })),
-                    )
-                },
-            ))
-        } else {
-            Err(ShaleError::DecodeError)
+                    NodeType::Branch(BranchNode { chd, value }),
+                ))
+            }
+            Self::EXT_NODE => {
+                let ext_header_size = 1 + 8;
+                let node_raw = mem
+                    .get_view(addr + META_SIZE, ext_header_size)
+                    .ok_or(ShaleError::LinearMemStoreError)?;
+                let mut cur = Cursor::new(node_raw.deref());
+                let mut buff = [0; 8];
+                cur.read_exact(&mut buff[..1]).map_err(|_| ShaleError::DecodeError)?;
+                let len = buff[0] as u64;
+                cur.read_exact(&mut buff).map_err(|_| ShaleError::DecodeError)?;
+                let ptr = u64::from_le_bytes(buff);
+                let nibbles: Vec<_> = to_nibbles(
+                    &*mem
+                        .get_view(addr + META_SIZE + ext_header_size, len)
+                        .ok_or(ShaleError::LinearMemStoreError)?,
+                )
+                .collect();
+                let (path, _) = PartialPath::decode(nibbles);
+                Ok(Self::new_from_hash(
+                    root_hash,
+                    eth_rlp_long,
+                    NodeType::Extension(ExtNode(path, unsafe { ObjPtr::new_from_addr(ptr) })),
+                ))
+            }
+            Self::LEAF_NODE => {
+                let leaf_header_size = 1 + 4;
+                let node_raw = mem
+                    .get_view(addr + META_SIZE, leaf_header_size)
+                    .ok_or(ShaleError::LinearMemStoreError)?;
+                let mut cur = Cursor::new(node_raw.deref());
+                let mut buff = [0; 4];
+                cur.read_exact(&mut buff[..1]).map_err(|_| ShaleError::DecodeError)?;
+                let path_len = buff[0] as u64;
+                cur.read_exact(&mut buff).map_err(|_| ShaleError::DecodeError)?;
+                let data_len = u32::from_le_bytes(buff) as u64;
+                let remainder = mem
+                    .get_view(addr + META_SIZE + leaf_header_size, path_len + data_len)
+                    .ok_or(ShaleError::LinearMemStoreError)?;
+                let nibbles: Vec<_> = to_nibbles(&remainder[..path_len as usize]).collect();
+                let (path, _) = PartialPath::decode(nibbles);
+                let value = Data(remainder[path_len as usize..].to_vec());
+                Ok(Self::new_from_hash(
+                    root_hash,
+                    eth_rlp_long,
+                    NodeType::Leaf(LeafNode(path, value)),
+                ))
+            }
+            _ => Err(ShaleError::DecodeError),
         }
     }
 
-    fn dehydrate(&self) -> Vec<u8> {
-        let mut items;
-        match &self.inner {
-            NodeType::Branch(n) => {
-                items = Vec::new();
-                for c in n.chd.iter() {
-                    items.push(match c {
-                        Some(p) => p.addr().to_le_bytes().to_vec(),
-                        None => 0u64.to_le_bytes().to_vec(),
-                    });
+    fn dehydrated_len(&self) -> u64 {
+        32 + 1 +
+            1 +
+            match &self.inner {
+                NodeType::Branch(n) => {
+                    NBRANCH as u64 * 8 +
+                        4 +
+                        match &n.value {
+                            Some(val) => val.len() as u64,
+                            None => 0,
+                        }
                 }
-                items.push(match &n.value {
-                    Some(val) => val.to_vec(),
-                    None => Vec::new(),
-                });
+                NodeType::Extension(n) => 1 + 8 + n.0.dehydrated_len(),
+                NodeType::Leaf(n) => 1 + 4 + n.0.dehydrated_len() + n.1.len() as u64,
             }
-            NodeType::Extension(n) => {
-                items = vec![
-                    from_nibbles(&n.0.encode(false)).collect(),
-                    n.1.addr().to_le_bytes().to_vec(),
-                ];
-            }
-            NodeType::Leaf(n) => {
-                items = vec![from_nibbles(&n.0.encode(true)).collect(), n.1.to_vec()];
-            }
-        }
-        let mut m = Vec::new();
-        let rlp_encoded = rlp::encode_list::<Vec<u8>, _>(&items);
+    }
+
+    fn dehydrate(&self, to: &mut [u8]) {
+        let mut cur = Cursor::new(to);
+
         let mut attrs = 0;
         attrs |= match self.root_hash.get() {
             Some(h) => {
-                m.extend(h.0);
+                cur.write_all(&h.0).unwrap();
                 Node::ROOT_HASH_VALID_BIT
             }
             None => {
-                m.resize(m.len() + 32, 0);
+                cur.write_all(&[0; 32]).unwrap();
                 0
             }
         };
@@ -449,22 +486,58 @@ impl MummyItem for Node {
             Some(b) => (if *b { Node::ETH_RLP_LONG_BIT } else { 0 } | Node::ETH_RLP_LONG_VALID_BIT),
             None => 0,
         };
-        m.push(attrs);
-        m.extend((rlp_encoded.len() as u64).to_le_bytes().to_vec());
-        m.extend(rlp_encoded);
-        m
+        cur.write_all(&[attrs]).unwrap();
+
+        match &self.inner {
+            NodeType::Branch(n) => {
+                cur.write_all(&[Self::BRANCH_NODE]).unwrap();
+                for c in n.chd.iter() {
+                    cur.write_all(&match c {
+                        Some(p) => p.addr().to_le_bytes(),
+                        None => 0u64.to_le_bytes(),
+                    })
+                    .unwrap();
+                }
+                match &n.value {
+                    Some(val) => {
+                        cur.write_all(&(val.len() as u32).to_le_bytes()).unwrap();
+                        cur.write_all(&val).unwrap();
+                    }
+                    None => {
+                        cur.write_all(&u32::MAX.to_le_bytes()).unwrap();
+                    }
+                }
+            }
+            NodeType::Extension(n) => {
+                cur.write_all(&[Self::EXT_NODE]).unwrap();
+                let path: Vec<u8> = from_nibbles(&n.0.encode(false)).collect();
+                cur.write_all(&[path.len() as u8]).unwrap();
+                cur.write_all(&n.1.addr().to_le_bytes()).unwrap();
+                cur.write_all(&path).unwrap();
+            }
+            NodeType::Leaf(n) => {
+                cur.write_all(&[Self::LEAF_NODE]).unwrap();
+                let path: Vec<u8> = from_nibbles(&n.0.encode(true)).collect();
+                cur.write_all(&[path.len() as u8]).unwrap();
+                cur.write_all(&(n.1.len() as u32).to_le_bytes()).unwrap();
+                cur.write_all(&path).unwrap();
+                cur.write_all(&n.1).unwrap();
+            }
+        }
     }
 }
 
 #[test]
 fn test_merkle_node_encoding() {
     let check = |node: Node| {
-        let bytes = node.dehydrate();
+        let mut bytes = Vec::new();
+        bytes.resize(node.dehydrated_len() as usize, 0);
+        node.dehydrate(&mut bytes);
+
         let mem = shale::PlainMem::new(bytes.len() as u64, 0x0);
         mem.write(0, &bytes);
         println!("{:?}", bytes);
-        let (size, node_) = Node::hydrate(0, &mem).unwrap();
-        assert_eq!(bytes.len(), size as usize);
+        let node_ = Node::hydrate(0, &mem).unwrap();
         assert!(node == node_);
     };
     let chd0 = [None; NBRANCH];
@@ -495,7 +568,7 @@ fn test_merkle_node_encoding() {
         ),
         Node::new_from_hash(None, None, NodeType::Branch(BranchNode { chd: chd1, value: None })),
     ] {
-        check(node)
+        check(node);
     }
 }
 
@@ -1395,6 +1468,10 @@ impl Merkle {
         }
 
         Err(MerkleError::KeyNotFound)
+    }
+
+    pub fn flush_dirty(&self) -> Option<()> {
+        self.store.flush_dirty()
     }
 }
 

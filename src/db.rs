@@ -126,29 +126,29 @@ impl MerkleHeader {
 }
 
 impl MummyItem for MerkleHeader {
-    fn hydrate(addr: u64, mem: &dyn MemStore) -> Result<(u64, Self), shale::ShaleError> {
+    fn hydrate(addr: u64, mem: &dyn MemStore) -> Result<Self, shale::ShaleError> {
         let raw = mem
             .get_view(addr, Self::MSIZE)
             .ok_or(shale::ShaleError::LinearMemStoreError)?;
         let acc_root = u64::from_le_bytes(raw[..8].try_into().unwrap());
         let kv_root = u64::from_le_bytes(raw[8..].try_into().unwrap());
         unsafe {
-            Ok((
-                Self::MSIZE,
-                Self {
-                    acc_root: ObjPtr::new_from_addr(acc_root),
-                    kv_root: ObjPtr::new_from_addr(kv_root),
-                },
-            ))
+            Ok(Self {
+                acc_root: ObjPtr::new_from_addr(acc_root),
+                kv_root: ObjPtr::new_from_addr(kv_root),
+            })
         }
     }
 
-    fn dehydrate(&self) -> Vec<u8> {
-        let mut m = Vec::new();
-        m.extend(self.acc_root.addr().to_le_bytes());
-        m.extend(self.kv_root.addr().to_le_bytes());
-        assert_eq!(m.len() as u64, Self::MSIZE);
-        m
+    fn dehydrated_len(&self) -> u64 {
+        Self::MSIZE
+    }
+
+    fn dehydrate(&self, to: &mut [u8]) {
+        use std::io::{Cursor, Write};
+        let mut cur = Cursor::new(to);
+        cur.write_all(&self.acc_root.addr().to_le_bytes()).unwrap();
+        cur.write_all(&self.kv_root.addr().to_le_bytes()).unwrap();
     }
 }
 
@@ -194,6 +194,12 @@ pub struct DBRev {
 }
 
 impl DBRev {
+    fn flush_dirty(&mut self) -> Option<()> {
+        self.header.flush_dirty();
+        self.merkle.flush_dirty()?;
+        self.blob.flush_dirty()
+    }
+
     fn borrow_split(&mut self) -> (&mut shale::Obj<MerkleHeader>, &mut Merkle, &mut BlobStash) {
         (&mut self.header, &mut self.merkle, &mut self.blob)
     }
@@ -416,6 +422,9 @@ impl DB {
             ),
         };
 
+        // recover from WAL
+        disk_requester.init_wal("wal", db_fd);
+
         // set up the storage layout
         let merkle_payload_header: ObjPtr<CompactSpaceHeader>;
         let merkle_header: ObjPtr<MerkleHeader>;
@@ -436,15 +445,15 @@ impl DB {
             // initialize space headers
             staging.merkle.meta.write(
                 merkle_payload_header.addr(),
-                &shale::compact::CompactSpaceHeader::new(SPACE_RESERVED, SPACE_RESERVED).dehydrate(),
+                &shale::to_dehydrated(&shale::compact::CompactSpaceHeader::new(SPACE_RESERVED, SPACE_RESERVED)),
             );
             staging
                 .merkle
                 .meta
-                .write(merkle_header.addr(), &MerkleHeader::new_empty().dehydrate());
+                .write(merkle_header.addr(), &shale::to_dehydrated(&MerkleHeader::new_empty()));
             staging.blob.meta.write(
                 blob_payload_header.addr(),
-                &shale::compact::CompactSpaceHeader::new(SPACE_RESERVED, SPACE_RESERVED).dehydrate(),
+                &shale::to_dehydrated(&shale::compact::CompactSpaceHeader::new(SPACE_RESERVED, SPACE_RESERVED)),
             );
         }
 
@@ -484,9 +493,6 @@ impl DB {
         )
         .unwrap();
 
-        // recover from WAL
-        disk_requester.init_wal("wal", db_fd);
-
         if merkle_header_ref.acc_root.is_null() {
             let mut err = Ok(());
             // create the sentinel node
@@ -501,11 +507,12 @@ impl DB {
             err.map_err(DBError::Merkle)?
         }
 
-        let latest = DBRev {
+        let mut latest = DBRev {
             header: merkle_header_ref,
             merkle: Merkle::new(Box::new(merkle_space)),
             blob: BlobStash::new(Box::new(blob_space)),
         };
+        latest.flush_dirty().unwrap();
 
         Ok(Self {
             inner: Mutex::new(DBInner {
@@ -559,6 +566,7 @@ impl DB {
 
     pub fn get_revision(&self, nback: usize, cfg: Option<DBRevConfig>) -> Option<Revision> {
         let mut inner = self.inner.lock();
+
         let rlen = inner.revisions.len();
         if nback == 0 || nback > inner.max_revisions {
             return None
@@ -780,6 +788,7 @@ impl<'a> WriteBatch<'a> {
         use crate::storage::BufferWrite;
         let inner = &mut *self.m;
         // clear the staging layer and apply changes to the CachedSpace
+        inner.latest.flush_dirty().unwrap();
         let (merkle_payload_pages, merkle_payload_plain) = inner.staging.merkle.payload.take_delta();
         let (merkle_meta_pages, merkle_meta_plain) = inner.staging.merkle.meta.take_delta();
         let (blob_payload_pages, blob_payload_plain) = inner.staging.blob.payload.take_delta();

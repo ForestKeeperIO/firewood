@@ -1,3 +1,5 @@
+use std::io::{Cursor, Write};
+
 use crate::merkle::{Hash, Node, ValueTransformer};
 use primitive_types::U256;
 use shale::{MemStore, MummyItem, ObjPtr, ObjRef, ShaleError, ShaleStore};
@@ -96,20 +98,25 @@ pub enum Blob {
 
 impl MummyItem for Blob {
     // currently there is only one variant of Blob: Code
-    fn hydrate(addr: u64, mem: &dyn MemStore) -> Result<(u64, Self), ShaleError> {
+    fn hydrate(addr: u64, mem: &dyn MemStore) -> Result<Self, ShaleError> {
         let raw = mem.get_view(addr, 4).ok_or(ShaleError::LinearMemStoreError)?;
         let len = u32::from_le_bytes(raw[..].try_into().unwrap()) as u64;
         let bytes = mem.get_view(addr + 4, len).ok_or(ShaleError::LinearMemStoreError)?;
-        Ok((4 + len, Self::Code(bytes.to_vec())))
+        Ok(Self::Code(bytes.to_vec()))
     }
 
-    fn dehydrate(&self) -> Vec<u8> {
+    fn dehydrated_len(&self) -> u64 {
+        match self {
+            Self::Code(code) => 4 + code.len() as u64,
+        }
+    }
+
+    fn dehydrate(&self, to: &mut [u8]) {
         match self {
             Self::Code(code) => {
-                let mut buff = Vec::new();
-                buff.extend((code.len() as u32).to_le_bytes());
-                buff.extend(code);
-                buff
+                let mut cur = Cursor::new(to);
+                cur.write_all(&(code.len() as u32).to_le_bytes()).unwrap();
+                cur.write_all(&code).unwrap();
             }
         }
     }
@@ -139,5 +146,9 @@ impl BlobStash {
 
     pub fn free_blob(&mut self, ptr: ObjPtr<Blob>) -> Result<(), BlobError> {
         self.store.free_item(ptr).map_err(BlobError::Shale)
+    }
+
+    pub fn flush_dirty(&self) -> Option<()> {
+        self.store.flush_dirty()
     }
 }

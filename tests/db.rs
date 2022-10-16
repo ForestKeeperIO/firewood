@@ -54,15 +54,25 @@ fn test_revisions() {
             dumped.push_front(db.kv_dump());
             for i in 1..dumped.len() {
                 let rev = db.get_revision(i, None).unwrap();
-                assert_eq!(rev.kv_dump(), dumped[i]);
+                let a = &rev.kv_dump();
+                let b = &dumped[i];
+                if a != b {
+                    print!("{}\n{}", a, b);
+                    panic!("not the same");
+                }
             }
         }
         drop(db);
         let db = DB::new("test_revisions_db", &cfg.clone().truncate(false).build()).unwrap();
         for j in 1..dumped.len() {
             let rev = db.get_revision(j, None).unwrap();
-            assert_eq!(rev.kv_dump(), dumped[j]);
+            let a = &rev.kv_dump();
+            let b = &dumped[j];
+            if a != b {
+                print!("{}\n{}", a, b);
+                panic!("not the same");
+            }
         }
-        println!("i = {}\n{}", i, dumped[0]);
+        println!("i = {}", i);
     }
 }
