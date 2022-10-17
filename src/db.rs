@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
+use std::io::{Cursor, Write};
 use std::rc::Rc;
 use std::thread::JoinHandle;
-use std::io::{Cursor, Write};
 
 use parking_lot::{Mutex, MutexGuard};
 use primitive_types::U256;
