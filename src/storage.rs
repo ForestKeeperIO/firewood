@@ -905,6 +905,11 @@ impl DiskBuffer {
                 }
                 if slot.staging_notifiers.is_empty() {
                     e.remove();
+                    if self.pending.len() < self.cfg.max_pending {
+                        if let Some(notifier) = self.fc_notifier.take() {
+                            notifier.send(()).unwrap();
+                        }
+                    }
                 } else {
                     assert!(slot.writing_notifiers.is_empty());
                     std::mem::swap(&mut slot.writing_notifiers, &mut slot.staging_notifiers);
@@ -1182,7 +1187,8 @@ impl DiskBufferRequester {
 pub enum StoreError {
     System(nix::Error),
     InitError(String),
-    WriterError,
+    // TODO: more error report from the DiskBuffer
+    //WriterError,
 }
 
 impl From<nix::Error> for StoreError {
