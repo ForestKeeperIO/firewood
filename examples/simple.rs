@@ -54,6 +54,12 @@ fn main() {
     {
         let db = DB::new("simple_db", &cfg.truncate(false).build()).unwrap();
         print_states(&db);
-        //println!("{}", hex::encode(&*db.root_hash()));
+        let mut stdout = std::io::stdout();
+        db.dump(&mut stdout).unwrap();
+        db.dump_account(b"ted", &mut stdout).unwrap();
+        assert!(db.new_writebatch().delete_account(b"ted").unwrap().is_some());
+        print_states(&db);
+        db.dump_account(b"ted", &mut stdout).unwrap();
+        assert!(db.new_writebatch().delete_account(b"nobody").unwrap().is_none());
     }
 }

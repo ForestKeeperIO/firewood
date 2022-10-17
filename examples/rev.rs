@@ -23,7 +23,7 @@ fn main() {
             println!("{}", hex::encode(*wb.kv_root_hash().unwrap()));
             wb.commit();
         }
-        println!("{}", db.kv_dump());
+        db.kv_dump(&mut std::io::stdout()).unwrap();
         println!(
             "{}",
             hex::encode(*db.get_revision(1, None).unwrap().kv_root_hash().unwrap())
@@ -37,11 +37,13 @@ fn main() {
         let db = DB::new("rev_db", &cfg.truncate(false).build()).unwrap();
         {
             let rev = db.get_revision(1, None).unwrap();
-            print!("{}\n{}", hex::encode(*rev.kv_root_hash().unwrap()), rev.kv_dump());
+            print!("{}", hex::encode(*rev.kv_root_hash().unwrap()));
+            rev.kv_dump(&mut std::io::stdout()).unwrap();
         }
         {
             let rev = db.get_revision(2, None).unwrap();
-            print!("{}\n{}", hex::encode(*rev.kv_root_hash().unwrap()), rev.kv_dump());
+            print!("{}", hex::encode(*rev.kv_root_hash().unwrap()));
+            rev.kv_dump(&mut std::io::stdout()).unwrap();
         }
     }
 }

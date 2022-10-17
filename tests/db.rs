@@ -1,8 +1,16 @@
+use firewood::db::{DBConfig, WALConfig, DB};
 use std::collections::VecDeque;
+
+macro_rules! kv_dump {
+    ($e: ident) => {{
+        let mut s = Vec::new();
+        $e.kv_dump(&mut s).unwrap();
+        String::from_utf8(s).unwrap()
+    }};
+}
 
 #[test]
 fn test_revisions() {
-    use firewood::db::{DBConfig, WALConfig, DB};
     use rand::{rngs::StdRng, Rng, SeedableRng};
     let cfg = DBConfig::builder()
         .meta_ncached_pages(1024)
@@ -51,10 +59,10 @@ fn test_revisions() {
             while dumped.len() > 10 {
                 dumped.pop_back();
             }
-            dumped.push_front(db.kv_dump());
+            dumped.push_front(kv_dump!(db));
             for i in 1..dumped.len() {
                 let rev = db.get_revision(i, None).unwrap();
-                let a = &rev.kv_dump();
+                let a = &kv_dump!(rev);
                 let b = &dumped[i];
                 if a != b {
                     print!("{}\n{}", a, b);
@@ -66,7 +74,7 @@ fn test_revisions() {
         let db = DB::new("test_revisions_db", &cfg.clone().truncate(false).build()).unwrap();
         for j in 1..dumped.len() {
             let rev = db.get_revision(j, None).unwrap();
-            let a = &rev.kv_dump();
+            let a = &kv_dump!(rev);
             let b = &dumped[j];
             if a != b {
                 print!("{}\n{}", a, b);
