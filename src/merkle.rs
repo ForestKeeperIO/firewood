@@ -1259,19 +1259,19 @@ impl Merkle {
         Ok(())
     }
 
-    pub fn remove<K: AsRef<[u8]>>(&mut self, key: K, root: ObjPtr<Node>) -> Result<bool, MerkleError> {
+    pub fn remove<K: AsRef<[u8]>>(&mut self, key: K, root: ObjPtr<Node>) -> Result<Option<Vec<u8>>, MerkleError> {
         let mut chunks = vec![0];
         chunks.extend(to_nibbles(key.as_ref()));
 
         if root.is_null() {
-            return Ok(false)
+            return Ok(None)
         }
 
         let mut deleted = Vec::new();
         let mut parents: Vec<(ObjRef<Node>, _)> = Vec::new();
         let mut u_ref = self.get_node(root)?;
         let mut nskip = 0;
-        let mut found = false;
+        let mut found = None;
 
         for (i, nib) in chunks.iter().enumerate() {
             if nskip > 0 {
@@ -1281,13 +1281,13 @@ impl Merkle {
             let next_ptr = match &u_ref.inner {
                 NodeType::Branch(n) => match n.chd[*nib as usize] {
                     Some(c) => c,
-                    None => return Ok(false),
+                    None => return Ok(None),
                 },
                 NodeType::Leaf(n) => {
                     if &chunks[i..] != &*n.0 {
-                        return Ok(false)
+                        return Ok(None)
                     }
-                    found = true;
+                    found = Some(n.1.clone());
                     deleted.push(u_ref.as_ptr());
                     self.after_remove_leaf(&mut parents, &mut deleted)?;
                     break
@@ -1296,7 +1296,7 @@ impl Merkle {
                     let n_path = &*n.0;
                     let rem_path = &chunks[i..];
                     if rem_path < n_path || &rem_path[..n_path.len()] != n_path {
-                        return Ok(false)
+                        return Ok(None)
                     }
                     nskip = n_path.len() - 1;
                     n.1
@@ -1306,20 +1306,19 @@ impl Merkle {
             parents.push((u_ref, *nib));
             u_ref = self.get_node(next_ptr)?;
         }
-        if !found {
+        if found.is_none() {
             match &u_ref.inner {
                 NodeType::Branch(n) => {
                     if n.value.is_none() {
-                        return Ok(false)
+                        return Ok(None)
                     }
                     let (c_chd, _) = n.single_child();
                     u_ref
                         .write(|u| {
-                            u.inner.as_branch_mut().unwrap().value = None;
+                            found = u.inner.as_branch_mut().unwrap().value.take();
                             u.rehash()
                         })
                         .unwrap();
-                    found = true;
                     if let Some((c_ptr, idx)) = c_chd {
                         deleted.push(u_ref.as_ptr());
                         self.after_remove_branch((c_ptr, idx), &mut parents, &mut deleted)?
@@ -1327,9 +1326,9 @@ impl Merkle {
                 }
                 NodeType::Leaf(n) => {
                     if n.0.len() > 0 {
-                        return Ok(false)
+                        return Ok(None)
                     }
-                    found = true;
+                    found = Some(n.1.clone());
                     deleted.push(u_ref.as_ptr());
                     self.after_remove_leaf(&mut parents, &mut deleted)?
                 }
@@ -1346,7 +1345,36 @@ impl Merkle {
         for ptr in deleted.into_iter() {
             self.free_node(ptr)?;
         }
-        Ok(found)
+        Ok(found.map(|e| e.0))
+    }
+
+    fn remove_tree_(&self, u: ObjPtr<Node>, deleted: &mut Vec<ObjPtr<Node>>) -> Result<(), MerkleError> {
+        let u_ref = self.get_node(u)?;
+        match &u_ref.inner {
+            NodeType::Branch(n) => {
+                for c in n.chd.iter() {
+                    if let Some(c) = c {
+                        self.remove_tree_(*c, deleted)?
+                    }
+                }
+            }
+            NodeType::Leaf(_) => (),
+            NodeType::Extension(n) => self.remove_tree_(n.1, deleted)?,
+        }
+        deleted.push(u);
+        Ok(())
+    }
+
+    pub fn remove_tree(&mut self, root: ObjPtr<Node>) -> Result<(), MerkleError> {
+        let mut deleted = Vec::new();
+        if root.is_null() {
+            return Ok(())
+        }
+        self.remove_tree_(root, &mut deleted)?;
+        for ptr in deleted.into_iter() {
+            self.free_node(ptr)?;
+        }
+        Ok(())
     }
 
     pub fn get_mut(&mut self, key: &[u8], root: ObjPtr<Node>) -> Result<RefMut, MerkleError> {

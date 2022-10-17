@@ -237,7 +237,11 @@ impl DBRev {
     }
 
     pub fn get_code(&self, key: &[u8]) -> Result<Vec<u8>, DBError> {
-        let b = self.blob.get_blob(self.get_account(key)?.code).map_err(DBError::Blob)?;
+        let code = self.get_account(key)?.code;
+        if code.is_null() {
+            return Ok(Vec::new())
+        }
+        let b = self.blob.get_blob(code).map_err(DBError::Blob)?;
         Ok(match &**b {
             Blob::Code(code) => code.clone(),
         })
@@ -677,7 +681,7 @@ impl<'a> WriteBatch<'a> {
         merkle.insert(key, val, header.kv_root).map_err(DBError::Merkle)
     }
 
-    pub fn kv_remove<K: AsRef<[u8]>>(&mut self, key: K) -> Result<bool, DBError> {
+    pub fn kv_remove<K: AsRef<[u8]>>(&mut self, key: K) -> Result<Option<Vec<u8>>, DBError> {
         let (header, merkle, _) = self.m.latest.borrow_split();
         merkle.remove(key, header.kv_root).map_err(DBError::Merkle)
     }
@@ -782,6 +786,24 @@ impl<'a> WriteBatch<'a> {
         merkle
             .insert(key, acc.serialize(), header.acc_root)
             .map_err(DBError::Merkle)
+    }
+
+    pub fn delete_account(&mut self, key: &[u8]) -> Result<Option<Account>, DBError> {
+        let (header, merkle, blob_stash) = self.m.latest.borrow_split();
+        let mut acc = match merkle.remove(key, header.acc_root) {
+            Ok(Some(bytes)) => Account::deserialize(&bytes),
+            Ok(None) => return Ok(None),
+            Err(e) => return Err(DBError::Merkle(e)),
+        };
+        if !acc.root.is_null() {
+            merkle.remove_tree(acc.root).map_err(DBError::Merkle)?;
+            acc.root = ObjPtr::null();
+        }
+        if !acc.code.is_null() {
+            blob_stash.free_blob(acc.code).map_err(DBError::Blob)?;
+            acc.code = ObjPtr::null();
+        }
+        Ok(Some(acc))
     }
 
     pub fn commit(mut self) {

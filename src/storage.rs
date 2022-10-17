@@ -409,10 +409,6 @@ impl StoreRevMut {
         pages.sort_by_key(|p| p.0);
         (StoreDelta(pages), deltas.plain)
     }
-
-    pub fn len(&self) -> usize {
-        self.deltas.borrow().pages.len()
-    }
 }
 
 impl MemStore for StoreRevMut {
@@ -501,15 +497,18 @@ impl MemStore for StoreRevMut {
     }
 }
 
+#[cfg(test)]
 #[derive(Clone)]
 pub struct ZeroStore(Rc<()>);
 
+#[cfg(test)]
 impl ZeroStore {
     pub fn new() -> Self {
         Self(Rc::new(()))
     }
 }
 
+#[cfg(test)]
 impl MemStoreR for ZeroStore {
     fn get_slice(&self, _: u64, length: u64) -> Option<Vec<u8>> {
         Some(vec![0; length as usize])
