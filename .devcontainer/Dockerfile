@@ -11,6 +11,7 @@ FROM mcr.microsoft.com/vscode/devcontainers/rust:0-${VARIANT}
 # Add nightly configuration
 RUN rustup toolchain add nightly
 RUN rustup default nightly
+RUN rustup component add rust-src --toolchain nightly
 
 # Add linters
 RUN rustup component add rustfmt
