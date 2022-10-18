@@ -55,8 +55,8 @@ fn main() {
                         for (k, v) in batch {
                             wb.kv_insert(k, v.clone()).unwrap();
                         }
-                        if root_hash {
-                            wb.kv_root_hash().unwrap();
+                        if !root_hash {
+                            wb.no_root_hash();
                         }
                         wb.commit();
                     }
