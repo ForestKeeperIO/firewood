@@ -47,3 +47,20 @@ jobs:
           override: true
       - name: Run tests
         run: cargo test --verbose
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly
+          override: true
+      - name: Run simple example
+        run: cargo run --example simple
+      - name: Run dump example
+        run: cargo run --example dump
+      - name: Run benchmark example
+        run: cargo run --example benchmark
+      - name: Run rev example
+        run: cargo run --example rev
