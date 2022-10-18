@@ -1,3 +1,4 @@
+use std::fmt;
 use std::io::{Cursor, Write};
 
 use crate::merkle::{Hash, Node, ValueTransformer};
@@ -150,5 +151,18 @@ impl BlobStash {
 
     pub fn flush_dirty(&self) -> Option<()> {
         self.store.flush_dirty()
+    }
+}
+
+impl fmt::Debug for Account {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+        write!(
+            f,
+            "<Account balance={} nonce={} code_hash={} state_hash={}>",
+            self.balance,
+            self.nonce,
+            hex::encode(*self.code_hash),
+            hex::encode(*self.root_hash)
+        )
     }
 }

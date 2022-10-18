@@ -4,7 +4,7 @@ use sha3::Digest;
 use shale::{MemStore, MummyItem, ObjPtr, ObjRef, ShaleError, ShaleStore};
 
 use std::cell::Cell;
-use std::fmt::Debug;
+use std::fmt::{self, Debug};
 use std::io::{Cursor, Read, Write};
 
 const NBRANCH: usize = 16;
@@ -12,8 +12,9 @@ const NBRANCH: usize = 16;
 #[derive(Debug)]
 pub enum MerkleError {
     Shale(ShaleError),
-    KeyNotFound,
     ReadOnly,
+    NotBranchNode,
+    Format(std::io::Error),
 }
 
 #[derive(PartialEq, Eq, Clone)]
@@ -50,7 +51,7 @@ impl MummyItem for Hash {
 struct PartialPath(Vec<u8>);
 
 impl Debug for PartialPath {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         for nib in self.0.iter() {
             write!(f, "{:x}", *nib & 0xf)?;
         }
@@ -139,7 +140,7 @@ struct BranchNode {
 }
 
 impl Debug for BranchNode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         write!(f, "[Branch")?;
         for (i, c) in self.chd.iter().enumerate() {
             if let Some(c) = c {
@@ -207,7 +208,7 @@ impl BranchNode {
 struct LeafNode(PartialPath, Data);
 
 impl Debug for LeafNode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         write!(f, "[Leaf {:?} {}]", self.0, hex::encode(&*self.1))
     }
 }
@@ -222,7 +223,7 @@ impl LeafNode {
 struct ExtNode(PartialPath, ObjPtr<Node>);
 
 impl Debug for ExtNode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         write!(f, "[Extension {:?} {}]", self.0, self.1)
     }
 }
@@ -637,7 +638,12 @@ impl Merkle {
     }
 
     pub fn root_hash<T: ValueTransformer>(&self, root: ObjPtr<Node>) -> Result<Hash, MerkleError> {
-        let root = self.get_node(root).unwrap().inner.as_branch().unwrap().chd[0];
+        let root = self
+            .get_node(root)?
+            .inner
+            .as_branch()
+            .ok_or(MerkleError::NotBranchNode)?
+            .chd[0];
         Ok(if let Some(root) = root {
             let mut node = self.get_node(root)?;
             let res = node.get_root_hash::<T>(self.store.as_ref()).clone();
@@ -651,11 +657,10 @@ impl Merkle {
         })
     }
 
-    fn dump_(&self, u: ObjPtr<Node>, output: &mut String) {
-        use std::fmt::Write;
-        let u_ref = self.get_node(u).unwrap();
+    fn dump_(&self, u: ObjPtr<Node>, w: &mut dyn Write) -> Result<(), MerkleError> {
+        let u_ref = self.get_node(u)?;
         write!(
-            output,
+            w,
             "{} => {}: ",
             u,
             match u_ref.root_hash.get() {
@@ -663,32 +668,31 @@ impl Merkle {
                 None => "<lazy>".to_string(),
             }
         )
-        .unwrap();
+        .map_err(MerkleError::Format)?;
         match &u_ref.inner {
             NodeType::Branch(n) => {
-                writeln!(output, "{:?}", n).unwrap();
+                writeln!(w, "{:?}", n).map_err(MerkleError::Format)?;
                 for c in n.chd.iter() {
                     if let Some(c) = c {
-                        self.dump_(*c, output)
+                        self.dump_(*c, w)?
                     }
                 }
             }
-            NodeType::Leaf(n) => writeln!(output, "{:?}", n).unwrap(),
+            NodeType::Leaf(n) => writeln!(w, "{:?}", n).unwrap(),
             NodeType::Extension(n) => {
-                writeln!(output, "{:?}", n).unwrap();
-                self.dump_(n.1, output)
+                writeln!(w, "{:?}", n).map_err(MerkleError::Format)?;
+                self.dump_(n.1, w)?
             }
         }
+        Ok(())
     }
 
-    pub fn dump(&self, root: ObjPtr<Node>) -> String {
-        if root.is_null() {
-            "<Empty>".to_string()
+    pub fn dump(&self, root: ObjPtr<Node>, w: &mut dyn Write) -> Result<(), MerkleError> {
+        Ok(if root.is_null() {
+            write!(w, "<Empty>").map_err(MerkleError::Format)?;
         } else {
-            let mut s = String::new();
-            self.dump_(root, &mut s);
-            s
-        }
+            self.dump_(root, w)?;
+        })
     }
 
     fn set_parent<'b>(&self, new_chd: ObjPtr<Node>, parents: &mut [(ObjRef<'b, Node>, u8)]) {
@@ -760,6 +764,7 @@ impl Merkle {
             }
             None => {
                 if rem_path.len() == n_path.len() {
+                    let mut err = None;
                     write_node!(
                         self,
                         u_ref,
@@ -767,13 +772,19 @@ impl Merkle {
                             match &mut u.inner {
                                 NodeType::Leaf(u) => u.1 = Data(val),
                                 NodeType::Extension(u) => {
-                                    let mut b_ref = self.get_node(u.1).unwrap();
-                                    if let None = b_ref.write(|b| {
-                                        b.inner.as_branch_mut().unwrap().value = Some(Data(val));
-                                        b.rehash()
-                                    }) {
-                                        u.1 = self.new_node(b_ref.clone()).unwrap().as_ptr();
-                                        deleted.push(b_ref.as_ptr());
+                                    match (|| {
+                                        let mut b_ref = self.get_node(u.1)?;
+                                        if let None = b_ref.write(|b| {
+                                            b.inner.as_branch_mut().unwrap().value = Some(Data(val));
+                                            b.rehash()
+                                        }) {
+                                            u.1 = self.new_node(b_ref.clone())?.as_ptr();
+                                            deleted.push(b_ref.as_ptr());
+                                        }
+                                        Ok(())
+                                    })() {
+                                        Err(e) => err = Some(Err(e)),
+                                        _ => (),
                                     }
                                 }
                                 _ => unreachable!(),
@@ -783,7 +794,7 @@ impl Merkle {
                         parents,
                         deleted
                     );
-                    return Ok(None)
+                    return err.unwrap_or(Ok(None))
                 }
                 let (leaf_ptr, prefix, idx, v) = if rem_path.len() < n_path.len() {
                     // key path is a prefix of the path to u
@@ -981,8 +992,7 @@ impl Merkle {
                     .new_node(Node::new(NodeType::Branch(BranchNode {
                         chd,
                         value: Some(Data(val.take().unwrap())),
-                    })))
-                    .unwrap()
+                    })))?
                     .as_ptr();
                 self.set_parent(branch, &mut parents);
             }
@@ -1028,8 +1038,7 @@ impl Merkle {
                     // from: [p: Branch] -> [b (v)]x -> [Leaf]x
                     // to: [p: Branch] -> [Leaf (v)]
                     let leaf = self
-                        .new_node(Node::new(NodeType::Leaf(LeafNode(PartialPath(Vec::new()), val))))
-                        .unwrap()
+                        .new_node(Node::new(NodeType::Leaf(LeafNode(PartialPath(Vec::new()), val))))?
                         .as_ptr();
                     p_ref
                         .write(|p| {
@@ -1045,8 +1054,7 @@ impl Merkle {
                         .new_node(Node::new(NodeType::Leaf(LeafNode(
                             PartialPath(n.0.clone().into_inner()),
                             val,
-                        ))))
-                        .unwrap()
+                        ))))?
                         .as_ptr();
                     deleted.push(p_ptr);
                     self.set_parent(leaf, parents);
@@ -1055,7 +1063,7 @@ impl Merkle {
             }
         } else {
             let (c_ptr, idx) = b_chd.unwrap();
-            let mut c_ref = self.get_node(c_ptr).unwrap();
+            let mut c_ref = self.get_node(c_ptr)?;
             match &c_ref.inner {
                 NodeType::Branch(_) => {
                     drop(c_ref);
@@ -1171,36 +1179,44 @@ impl Merkle {
         match &c_ref.inner {
             NodeType::Branch(_) => {
                 drop(c_ref);
+                let mut err = None;
                 write_node!(
                     self,
                     b_ref,
                     |b| {
-                        match &mut b.inner {
-                            NodeType::Branch(n) => {
-                                // from: [Branch] -> [Branch]x -> [Branch]
-                                // to: [Branch] -> [Ext] -> [Branch]
-                                n.chd[b_idx as usize] = Some(
-                                    self.new_node(Node::new(NodeType::Extension(ExtNode(
-                                        PartialPath(vec![idx]),
-                                        c_ptr,
-                                    ))))
-                                    .unwrap()
-                                    .as_ptr(),
-                                );
+                        match (|| {
+                            match &mut b.inner {
+                                NodeType::Branch(n) => {
+                                    // from: [Branch] -> [Branch]x -> [Branch]
+                                    // to: [Branch] -> [Ext] -> [Branch]
+                                    n.chd[b_idx as usize] = Some(
+                                        self.new_node(Node::new(NodeType::Extension(ExtNode(
+                                            PartialPath(vec![idx]),
+                                            c_ptr,
+                                        ))))?
+                                        .as_ptr(),
+                                    );
+                                }
+                                NodeType::Extension(n) => {
+                                    // from: [Ext] -> [Branch]x -> [Branch]
+                                    // to: [Ext] -> [Branch]
+                                    n.0 .0.push(idx);
+                                    n.1 = c_ptr
+                                }
+                                _ => unreachable!(),
                             }
-                            NodeType::Extension(n) => {
-                                // from: [Ext] -> [Branch]x -> [Branch]
-                                // to: [Ext] -> [Branch]
-                                n.0 .0.push(idx);
-                                n.1 = c_ptr
-                            }
-                            _ => unreachable!(),
+                            Ok(b.rehash())
+                        })() {
+                            Err(e) => err = Some(Err(e)),
+                            _ => (),
                         }
-                        b.rehash()
                     },
                     parents,
                     deleted
                 );
+                if let Some(e) = err {
+                    return e
+                }
             }
             NodeType::Leaf(_) | NodeType::Extension(_) => match &b_ref.inner {
                 NodeType::Branch(_) => {
@@ -1377,13 +1393,13 @@ impl Merkle {
         Ok(())
     }
 
-    pub fn get_mut(&mut self, key: &[u8], root: ObjPtr<Node>) -> Result<RefMut, MerkleError> {
+    pub fn get_mut(&mut self, key: &[u8], root: ObjPtr<Node>) -> Result<Option<RefMut>, MerkleError> {
         let mut chunks = vec![0];
         chunks.extend(to_nibbles(key.as_ref()));
         let mut parents = Vec::new();
 
         if root.is_null() {
-            return Err(MerkleError::KeyNotFound)
+            return Ok(None)
         }
 
         let mut u_ref = self.get_node(root)?;
@@ -1398,20 +1414,20 @@ impl Merkle {
             let next_ptr = match &u_ref.inner {
                 NodeType::Branch(n) => match n.chd[*nib as usize] {
                     Some(c) => c,
-                    None => return Err(MerkleError::KeyNotFound),
+                    None => return Ok(None),
                 },
                 NodeType::Leaf(n) => {
                     if &chunks[i..] != &*n.0 {
-                        return Err(MerkleError::KeyNotFound)
+                        return Ok(None)
                     }
                     drop(u_ref);
-                    return Ok(RefMut::new(u_ptr, parents, self))
+                    return Ok(Some(RefMut::new(u_ptr, parents, self)))
                 }
                 NodeType::Extension(n) => {
                     let n_path = &*n.0;
                     let rem_path = &chunks[i..];
                     if rem_path < n_path || &rem_path[..n_path.len()] != n_path {
-                        return Err(MerkleError::KeyNotFound)
+                        return Ok(None)
                     }
                     nskip = n_path.len() - 1;
                     n.1
@@ -1426,27 +1442,27 @@ impl Merkle {
             NodeType::Branch(n) => {
                 if let Some(_) = n.value.as_ref() {
                     drop(u_ref);
-                    return Ok(RefMut::new(u_ptr, parents, self))
+                    return Ok(Some(RefMut::new(u_ptr, parents, self)))
                 }
             }
             NodeType::Leaf(n) => {
                 if n.0.len() == 0 {
                     drop(u_ref);
-                    return Ok(RefMut::new(u_ptr, parents, self))
+                    return Ok(Some(RefMut::new(u_ptr, parents, self)))
                 }
             }
             _ => (),
         }
 
-        Err(MerkleError::KeyNotFound)
+        Ok(None)
     }
 
-    pub fn get(&self, key: &[u8], root: ObjPtr<Node>) -> Result<Ref, MerkleError> {
+    pub fn get(&self, key: &[u8], root: ObjPtr<Node>) -> Result<Option<Ref>, MerkleError> {
         let mut chunks = vec![0];
         chunks.extend(to_nibbles(key.as_ref()));
 
         if root.is_null() {
-            return Err(MerkleError::KeyNotFound)
+            return Ok(None)
         }
 
         let mut u_ref = self.get_node(root)?;
@@ -1460,19 +1476,19 @@ impl Merkle {
             let next_ptr = match &u_ref.inner {
                 NodeType::Branch(n) => match n.chd[*nib as usize] {
                     Some(c) => c,
-                    None => return Err(MerkleError::KeyNotFound),
+                    None => return Ok(None),
                 },
                 NodeType::Leaf(n) => {
                     if &chunks[i..] != &*n.0 {
-                        return Err(MerkleError::KeyNotFound)
+                        return Ok(None)
                     }
-                    return Ok(Ref(u_ref))
+                    return Ok(Some(Ref(u_ref)))
                 }
                 NodeType::Extension(n) => {
                     let n_path = &*n.0;
                     let rem_path = &chunks[i..];
                     if rem_path < n_path || &rem_path[..n_path.len()] != n_path {
-                        return Err(MerkleError::KeyNotFound)
+                        return Ok(None)
                     }
                     nskip = n_path.len() - 1;
                     n.1
@@ -1484,18 +1500,18 @@ impl Merkle {
         match &u_ref.inner {
             NodeType::Branch(n) => {
                 if let Some(_) = n.value.as_ref() {
-                    return Ok(Ref(u_ref))
+                    return Ok(Some(Ref(u_ref)))
                 }
             }
             NodeType::Leaf(n) => {
                 if n.0.len() == 0 {
-                    return Ok(Ref(u_ref))
+                    return Ok(Some(Ref(u_ref)))
                 }
             }
             _ => (),
         }
 
-        Err(MerkleError::KeyNotFound)
+        Ok(None)
     }
 
     pub fn flush_dirty(&self) -> Option<()> {

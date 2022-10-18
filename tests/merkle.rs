@@ -21,7 +21,9 @@ impl MerkleSetup {
     }
 
     fn dump(&self) -> String {
-        self.merkle.dump(self.root)
+        let mut s = Vec::new();
+        self.merkle.dump(self.root, &mut s).unwrap();
+        String::from_utf8(s).unwrap()
     }
 }
 

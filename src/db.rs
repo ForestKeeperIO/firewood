@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::io::{Cursor, Write};
 use std::rc::Rc;
 use std::thread::JoinHandle;
 
@@ -145,7 +146,6 @@ impl MummyItem for MerkleHeader {
     }
 
     fn dehydrate(&self, to: &mut [u8]) {
-        use std::io::{Cursor, Write};
         let mut cur = Cursor::new(to);
         cur.write_all(&self.acc_root.addr().to_le_bytes()).unwrap();
         cur.write_all(&self.kv_root.addr().to_le_bytes()).unwrap();
@@ -210,8 +210,8 @@ impl DBRev {
             .map_err(DBError::Merkle)
     }
 
-    pub fn kv_dump(&self) -> String {
-        self.merkle.dump(self.header.kv_root)
+    pub fn kv_dump(&self, w: &mut dyn Write) -> Result<(), DBError> {
+        self.merkle.dump(self.header.kv_root, w).map_err(DBError::Merkle)
     }
 
     pub fn root_hash(&self) -> Result<Hash, DBError> {
@@ -220,16 +220,29 @@ impl DBRev {
             .map_err(DBError::Merkle)
     }
 
-    pub fn dump(&self) -> String {
-        self.merkle.dump(self.header.acc_root)
+    pub fn dump(&self, w: &mut dyn Write) -> Result<(), DBError> {
+        self.merkle.dump(self.header.acc_root, w).map_err(DBError::Merkle)
     }
 
     fn get_account(&self, key: &[u8]) -> Result<Account, DBError> {
         Ok(match self.merkle.get(key, self.header.acc_root) {
-            Ok(bytes) => Account::deserialize(&*bytes),
-            Err(MerkleError::KeyNotFound) => Account::default(),
+            Ok(Some(bytes)) => Account::deserialize(&*bytes),
+            Ok(None) => Account::default(),
             Err(e) => return Err(DBError::Merkle(e)),
         })
+    }
+
+    pub fn dump_account(&self, key: &[u8], w: &mut dyn Write) -> Result<(), DBError> {
+        let acc = match self.merkle.get(key, self.header.acc_root) {
+            Ok(Some(bytes)) => Account::deserialize(&*bytes),
+            Ok(None) => Account::default(),
+            Err(e) => return Err(DBError::Merkle(e)),
+        };
+        write!(w, "{:?}\n", acc).unwrap();
+        if !acc.root.is_null() {
+            self.merkle.dump(acc.root, w).map_err(DBError::Merkle)?;
+        }
+        Ok(())
     }
 
     pub fn get_balance(&self, key: &[u8]) -> Result<U256, DBError> {
@@ -257,16 +270,15 @@ impl DBRev {
             return Ok(Vec::new())
         }
         Ok(match self.merkle.get(sub_key, root) {
-            Ok(v) => v.to_vec(),
-            Err(MerkleError::KeyNotFound) => Vec::new(),
+            Ok(Some(v)) => v.to_vec(),
+            Ok(None) => Vec::new(),
             Err(e) => return Err(DBError::Merkle(e)),
         })
     }
 
     pub fn exist(&self, key: &[u8]) -> Result<bool, DBError> {
         Ok(match self.merkle.get(key, self.header.acc_root) {
-            Ok(_) => true,
-            Err(MerkleError::KeyNotFound) => false,
+            Ok(r) => r.is_some(),
             Err(e) => return Err(DBError::Merkle(e)),
         })
     }
@@ -540,12 +552,16 @@ impl DB {
         }
     }
 
-    pub fn kv_dump(&self) -> String {
-        self.inner.lock().latest.kv_dump()
+    pub fn kv_dump(&self, w: &mut dyn Write) -> Result<(), DBError> {
+        self.inner.lock().latest.kv_dump(w)
     }
 
-    pub fn dump(&self) -> String {
-        self.inner.lock().latest.dump()
+    pub fn dump(&self, w: &mut dyn Write) -> Result<(), DBError> {
+        self.inner.lock().latest.dump(w)
+    }
+
+    pub fn dump_account(&self, key: &[u8], w: &mut dyn Write) -> Result<(), DBError> {
+        self.inner.lock().latest.dump_account(key, w)
     }
 
     pub fn get_balance(&self, key: &[u8]) -> Result<U256, DBError> {
@@ -676,9 +692,10 @@ pub struct WriteBatch<'a> {
 }
 
 impl<'a> WriteBatch<'a> {
-    pub fn kv_insert<K: AsRef<[u8]>>(&mut self, key: K, val: Vec<u8>) -> Result<(), DBError> {
+    pub fn kv_insert<K: AsRef<[u8]>>(&mut self, key: K, val: Vec<u8>) -> Result<&mut Self, DBError> {
         let (header, merkle, _) = self.m.latest.borrow_split();
-        merkle.insert(key, val, header.kv_root).map_err(DBError::Merkle)
+        merkle.insert(key, val, header.kv_root).map_err(DBError::Merkle)?;
+        Ok(self)
     }
 
     pub fn kv_remove<K: AsRef<[u8]>>(&mut self, key: K) -> Result<Option<Vec<u8>>, DBError> {
@@ -707,7 +724,7 @@ impl<'a> WriteBatch<'a> {
     ) -> Result<(), DBError> {
         let (header, merkle, blob) = self.m.latest.borrow_split();
         match merkle.get_mut(key, header.acc_root) {
-            Ok(mut bytes) => {
+            Ok(Some(mut bytes)) => {
                 let mut ret = Ok(());
                 bytes
                     .write(|b| {
@@ -721,7 +738,7 @@ impl<'a> WriteBatch<'a> {
                     .map_err(DBError::Merkle)?;
                 ret?;
             }
-            Err(MerkleError::KeyNotFound) => {
+            Ok(None) => {
                 let mut acc = Account::default();
                 modify(&mut acc, blob)?;
                 merkle
@@ -733,11 +750,12 @@ impl<'a> WriteBatch<'a> {
         Ok(())
     }
 
-    pub fn set_balance(&mut self, key: &[u8], balance: U256) -> Result<(), DBError> {
-        self.change_account(key, |acc, _| Ok(acc.balance = balance))
+    pub fn set_balance(&mut self, key: &[u8], balance: U256) -> Result<&mut Self, DBError> {
+        self.change_account(key, |acc, _| Ok(acc.balance = balance))?;
+        Ok(self)
     }
 
-    pub fn set_code(&mut self, key: &[u8], code: &[u8]) -> Result<(), DBError> {
+    pub fn set_code(&mut self, key: &[u8], code: &[u8]) -> Result<&mut Self, DBError> {
         use sha3::Digest;
         self.change_account(key, |acc, blob_stash| {
             if !acc.code.is_null() {
@@ -750,18 +768,20 @@ impl<'a> WriteBatch<'a> {
                     .map_err(DBError::Blob)?
                     .as_ptr(),
             ))
-        })
+        })?;
+        Ok(self)
     }
 
-    pub fn set_nonce(&mut self, key: &[u8], nonce: u64) -> Result<(), DBError> {
-        self.change_account(key, |acc, _| Ok(acc.nonce = nonce))
+    pub fn set_nonce(&mut self, key: &[u8], nonce: u64) -> Result<&mut Self, DBError> {
+        self.change_account(key, |acc, _| Ok(acc.nonce = nonce))?;
+        Ok(self)
     }
 
-    pub fn set_state(&mut self, key: &[u8], sub_key: &[u8], val: Vec<u8>) -> Result<(), DBError> {
+    pub fn set_state(&mut self, key: &[u8], sub_key: &[u8], val: Vec<u8>) -> Result<&mut Self, DBError> {
         let (header, merkle, _) = self.m.latest.borrow_split();
         let mut acc = match merkle.get(key, header.acc_root) {
-            Ok(r) => Account::deserialize(&*r),
-            Err(MerkleError::KeyNotFound) => Account::default(),
+            Ok(Some(r)) => Account::deserialize(&*r),
+            Ok(None) => Account::default(),
             Err(e) => return Err(DBError::Merkle(e)),
         };
         if acc.root.is_null() {
@@ -771,21 +791,23 @@ impl<'a> WriteBatch<'a> {
         acc.root_hash = merkle.root_hash::<IdTrans>(acc.root).map_err(DBError::Merkle)?;
         merkle
             .insert(key, acc.serialize(), header.acc_root)
-            .map_err(DBError::Merkle)
+            .map_err(DBError::Merkle)?;
+        Ok(self)
     }
 
-    pub fn create_account(&mut self, key: &[u8]) -> Result<(), DBError> {
+    pub fn create_account(&mut self, key: &[u8]) -> Result<&mut Self, DBError> {
         let (header, merkle, _) = self.m.latest.borrow_split();
         let old_balance = match merkle.get_mut(key, header.acc_root) {
-            Ok(bytes) => Account::deserialize(&*bytes.get()).balance,
-            Err(MerkleError::KeyNotFound) => U256::zero(),
+            Ok(Some(bytes)) => Account::deserialize(&*bytes.get()).balance,
+            Ok(None) => U256::zero(),
             Err(e) => return Err(DBError::Merkle(e)),
         };
         let mut acc = Account::default();
         acc.balance = old_balance;
         merkle
             .insert(key, acc.serialize(), header.acc_root)
-            .map_err(DBError::Merkle)
+            .map_err(DBError::Merkle)?;
+        Ok(self)
     }
 
     pub fn delete_account(&mut self, key: &[u8]) -> Result<Option<Account>, DBError> {

@@ -15,6 +15,9 @@ fn main() {
         &cfg.truncate(false).build(),
     )
     .unwrap();
-    println!("== Account Model ==\n{}", db.dump());
-    println!("== Generic KV ==\n{}", db.kv_dump());
+    let mut stdout = std::io::stdout();
+    println!("== Account Model ==");
+    db.dump(&mut stdout).unwrap();
+    println!("== Generic KV ==");
+    db.kv_dump(&mut stdout).unwrap();
 }
