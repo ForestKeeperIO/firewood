@@ -20,8 +20,8 @@ fn main() {
         for (k, v) in items.iter() {
             let mut wb = db.new_writebatch();
             wb.kv_insert(k, v.as_bytes().to_vec()).unwrap();
-            println!("{}", hex::encode(*wb.kv_root_hash().unwrap()));
             wb.commit();
+            println!("{}", hex::encode(*db.kv_root_hash().unwrap()));
         }
         db.kv_dump(&mut std::io::stdout()).unwrap();
         println!(

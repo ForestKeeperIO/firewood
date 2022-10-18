@@ -548,6 +548,7 @@ impl DB {
     pub fn new_writebatch(&self) -> WriteBatch {
         WriteBatch {
             m: self.inner.lock(),
+            root_hash_recalc: true,
             committed: false,
         }
     }
@@ -562,6 +563,14 @@ impl DB {
 
     pub fn dump_account(&self, key: &[u8], w: &mut dyn Write) -> Result<(), DBError> {
         self.inner.lock().latest.dump_account(key, w)
+    }
+
+    pub fn kv_root_hash(&self) -> Result<Hash, DBError> {
+        self.inner.lock().latest.kv_root_hash()
+    }
+
+    pub fn root_hash(&self) -> Result<Hash, DBError> {
+        self.inner.lock().latest.root_hash()
     }
 
     pub fn get_balance(&self, key: &[u8]) -> Result<U256, DBError> {
@@ -688,6 +697,7 @@ impl<'a> std::ops::Deref for Revision<'a> {
 
 pub struct WriteBatch<'a> {
     m: MutexGuard<'a, DBInner>,
+    root_hash_recalc: bool,
     committed: bool,
 }
 
@@ -701,22 +711,6 @@ impl<'a> WriteBatch<'a> {
     pub fn kv_remove<K: AsRef<[u8]>>(&mut self, key: K) -> Result<Option<Vec<u8>>, DBError> {
         let (header, merkle, _) = self.m.latest.borrow_split();
         merkle.remove(key, header.kv_root).map_err(DBError::Merkle)
-    }
-
-    pub fn kv_root_hash(&self) -> Result<Hash, DBError> {
-        self.m
-            .latest
-            .merkle
-            .root_hash::<IdTrans>(self.m.latest.header.kv_root)
-            .map_err(DBError::Merkle)
-    }
-
-    pub fn root_hash(&self) -> Result<Hash, DBError> {
-        self.m
-            .latest
-            .merkle
-            .root_hash::<AccountRLP>(self.m.latest.header.acc_root)
-            .map_err(DBError::Merkle)
     }
 
     fn change_account(
@@ -828,9 +822,20 @@ impl<'a> WriteBatch<'a> {
         Ok(Some(acc))
     }
 
+    /// Do not rehash merkle roots. This will leave the recalculation of the dirty root hashes to
+    /// future invocation of `root_hash`, `kv_root_hash` or batch commits.
+    pub fn no_root_hash(&mut self) -> &mut Self {
+        self.root_hash_recalc = false;
+        self
+    }
+
     pub fn commit(mut self) {
         use crate::storage::BufferWrite;
         let inner = &mut *self.m;
+        if self.root_hash_recalc {
+            inner.latest.root_hash().ok();
+            inner.latest.kv_root_hash().ok();
+        }
         // clear the staging layer and apply changes to the CachedSpace
         inner.latest.flush_dirty().unwrap();
         let (merkle_payload_pages, merkle_payload_plain) = inner.staging.merkle.payload.take_delta();
