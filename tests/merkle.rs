@@ -16,6 +16,14 @@ impl MerkleSetup {
         self.merkle.remove(key, self.root).unwrap();
     }
 
+    fn get<K: AsRef<[u8]>>(&self, key: K) -> Option<firewood::merkle::Ref> {
+        self.merkle.get(key, self.root).unwrap()
+    }
+
+    fn get_mut<K: AsRef<[u8]>>(&mut self, key: K) -> Option<firewood::merkle::RefMut> {
+        self.merkle.get_mut(key, self.root).unwrap()
+    }
+
     fn root_hash(&self) -> Hash {
         self.merkle.root_hash::<IdTrans>(self.root).unwrap()
     }
@@ -196,9 +204,9 @@ fn test_root_hash_random_deletions() {
             .collect();
         key
     };
-    for i in 0..1000 {
+    for i in 0..10 {
         let mut items = std::collections::HashMap::new();
-        for _ in 0..100 {
+        for _ in 0..1000 {
             let val: Vec<u8> = (0..8).map(|_| rng.borrow_mut().gen()).collect();
             items.insert(keygen(), val);
         }
@@ -210,8 +218,16 @@ fn test_root_hash_random_deletions() {
             merkle.insert(k, v.to_vec());
         }
         for (k, _) in items_ordered.into_iter() {
+            assert!(merkle.get(&k).is_some());
+            assert!(merkle.get_mut(&k).is_some());
             merkle.remove(&k);
+            assert!(merkle.get(&k).is_none());
+            assert!(merkle.get_mut(&k).is_none());
             items.remove(&k);
+            for (k, v) in items.iter() {
+                assert_eq!(&*merkle.get(k).unwrap(), &v[..]);
+                assert_eq!(&*merkle.get_mut(k).unwrap().get(), &v[..]);
+            }
             let h = triehash::trie_root::<keccak_hasher::KeccakHasher, Vec<_>, _, _>(items.iter().collect());
             let h0 = merkle.root_hash();
             if &h[..] != &*h0 {
