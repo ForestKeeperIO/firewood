@@ -51,7 +51,7 @@ impl MummyItem for Hash {
 struct PartialPath(Vec<u8>);
 
 impl Debug for PartialPath {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         for nib in self.0.iter() {
             write!(f, "{:x}", *nib & 0xf)?;
         }
