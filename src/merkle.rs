@@ -1393,7 +1393,7 @@ impl Merkle {
         Ok(())
     }
 
-    pub fn get_mut(&mut self, key: &[u8], root: ObjPtr<Node>) -> Result<Option<RefMut>, MerkleError> {
+    pub fn get_mut<K: AsRef<[u8]>>(&mut self, key: K, root: ObjPtr<Node>) -> Result<Option<RefMut>, MerkleError> {
         let mut chunks = vec![0];
         chunks.extend(to_nibbles(key.as_ref()));
         let mut parents = Vec::new();
@@ -1426,7 +1426,7 @@ impl Merkle {
                 NodeType::Extension(n) => {
                     let n_path = &*n.0;
                     let rem_path = &chunks[i..];
-                    if rem_path < n_path || &rem_path[..n_path.len()] != n_path {
+                    if rem_path.len() < n_path.len() || &rem_path[..n_path.len()] != n_path {
                         return Ok(None)
                     }
                     nskip = n_path.len() - 1;
@@ -1457,7 +1457,7 @@ impl Merkle {
         Ok(None)
     }
 
-    pub fn get(&self, key: &[u8], root: ObjPtr<Node>) -> Result<Option<Ref>, MerkleError> {
+    pub fn get<K: AsRef<[u8]>>(&self, key: K, root: ObjPtr<Node>) -> Result<Option<Ref>, MerkleError> {
         let mut chunks = vec![0];
         chunks.extend(to_nibbles(key.as_ref()));
 
@@ -1487,7 +1487,7 @@ impl Merkle {
                 NodeType::Extension(n) => {
                     let n_path = &*n.0;
                     let rem_path = &chunks[i..];
-                    if rem_path < n_path || &rem_path[..n_path.len()] != n_path {
+                    if rem_path.len() < n_path.len() || &rem_path[..n_path.len()] != n_path {
                         return Ok(None)
                     }
                     nskip = n_path.len() - 1;
