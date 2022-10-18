@@ -204,9 +204,9 @@ fn test_root_hash_random_deletions() {
             .collect();
         key
     };
-    for i in 0..1000 {
+    for i in 0..10 {
         let mut items = std::collections::HashMap::new();
-        for _ in 0..100 {
+        for _ in 0..1000 {
             let val: Vec<u8> = (0..8).map(|_| rng.borrow_mut().gen()).collect();
             items.insert(keygen(), val);
         }
