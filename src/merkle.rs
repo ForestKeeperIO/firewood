@@ -667,7 +667,8 @@ impl Merkle {
                 Some(h) => hex::encode(&**h),
                 None => "<lazy>".to_string(),
             }
-        ).map_err(MerkleError::Format)?;
+        )
+        .map_err(MerkleError::Format)?;
         match &u_ref.inner {
             NodeType::Branch(n) => {
                 writeln!(w, "{:?}", n).map_err(MerkleError::Format)?;
