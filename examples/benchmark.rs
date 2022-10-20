@@ -5,7 +5,7 @@ use firewood::db::{DBConfig, WALConfig, DB};
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    #[arg(short, long)]
+    #[arg(long)]
     nbatch: usize,
     #[arg(short, long)]
     batch_size: usize,
