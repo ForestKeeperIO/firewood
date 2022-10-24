@@ -23,7 +23,7 @@ graph TD
 ```
 
 ## Building 
-Firewood currently is linux-only, as it has a dependency on the linux library `libaio`. Use docker to build firewood on other systems. 
+Firewood currently is linux-only, as it has a dependency on the linux library `libaio. Unforunately docker is not able to successfully emulate the syscalls firewood relies on, so linux or a linux VM must be used to run firewood. 
 
 Firewood relies on the Rust nightly toolchain. 
 
