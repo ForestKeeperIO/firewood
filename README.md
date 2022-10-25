@@ -42,8 +42,7 @@ It prioritizes access to latest state, by providing extremely fast reads, but
 also provides a limited view into past state. It does not copy-on-write like
 the EVM, but instead makes in-place changes to the state tree. This ensures
 that the database size is small and stable during the course of running
-firewood. Firewood exists to provide a very fast storage layer for [qEVM](https:
-//github.com/ava-labs/qevm) to use in a custom subnet.
+firewood. Firewood exists to provide a very fast storage layer for [qEVM](https://github.com/ava-labs/qevm) to use in a custom subnet.
 
 ## Build
 Firewood currently is Linux-only, as it has a dependency on the asynchronous
