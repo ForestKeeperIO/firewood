@@ -15,9 +15,9 @@ use crate::storage::{CachedSpace, DiskBuffer, MemStoreR, SpaceWrite, StoreConfig
 pub use crate::storage::{DiskBufferConfig, WALConfig};
 
 const MERKLE_META_SPACE: SpaceID = 0x0;
-const MERKLE_COMPACT_SPACE: SpaceID = 0x1;
+const MERKLE_PAYLOAD_SPACE: SpaceID = 0x1;
 const BLOB_META_SPACE: SpaceID = 0x2;
-const BLOB_COMPACT_SPACE: SpaceID = 0x3;
+const BLOB_PAYLOAD_SPACE: SpaceID = 0x3;
 const SPACE_RESERVED: u64 = 0x1000;
 
 const MAGIC_STR: &[u8; 13] = b"firewood v0.1";
@@ -420,7 +420,7 @@ impl DB {
                         &StoreConfig::builder()
                             .ncached_pages(cfg.payload_ncached_pages)
                             .ncached_files(cfg.payload_ncached_files)
-                            .space_id(MERKLE_COMPACT_SPACE)
+                            .space_id(MERKLE_PAYLOAD_SPACE)
                             .file_nbit(header.payload_file_nbit)
                             .rootfd(merkle_payload_fd)
                             .build(),
@@ -446,7 +446,7 @@ impl DB {
                         &StoreConfig::builder()
                             .ncached_pages(cfg.payload_ncached_pages)
                             .ncached_files(cfg.payload_ncached_files)
-                            .space_id(BLOB_COMPACT_SPACE)
+                            .space_id(BLOB_PAYLOAD_SPACE)
                             .file_nbit(header.payload_file_nbit)
                             .rootfd(blob_payload_fd)
                             .build(),
@@ -669,9 +669,9 @@ impl DB {
                 };
                 inner.revisions.push_back(u.rewind(
                     &ash.0[&MERKLE_META_SPACE].old,
-                    &ash.0[&MERKLE_COMPACT_SPACE].old,
+                    &ash.0[&MERKLE_PAYLOAD_SPACE].old,
                     &ash.0[&BLOB_META_SPACE].old,
-                    &ash.0[&BLOB_COMPACT_SPACE].old,
+                    &ash.0[&BLOB_PAYLOAD_SPACE].old,
                 ));
             }
         }
@@ -980,9 +980,9 @@ impl<'a> WriteBatch<'a> {
             crate::storage::AshRecord(
                 [
                     (MERKLE_META_SPACE, merkle_meta_plain),
-                    (MERKLE_COMPACT_SPACE, merkle_payload_plain),
+                    (MERKLE_PAYLOAD_SPACE, merkle_payload_plain),
                     (BLOB_META_SPACE, blob_meta_plain),
-                    (BLOB_COMPACT_SPACE, blob_payload_plain),
+                    (BLOB_PAYLOAD_SPACE, blob_payload_plain),
                 ]
                 .into(),
             ),
