@@ -18,12 +18,7 @@ struct Args {
 fn main() {
     let args = Args::parse();
 
-    let cfg = DBConfig::builder()
-        .meta_ncached_pages(65536)
-        .meta_ncached_files(128)
-        .compact_ncached_pages(262144)
-        .compact_ncached_files(128)
-        .wal(WALConfig::builder().max_revisions(10).build());
+    let cfg = DBConfig::builder().wal(WALConfig::builder().max_revisions(10).build());
     {
         use rand::{Rng, SeedableRng};
         let mut c = Criterion::default();

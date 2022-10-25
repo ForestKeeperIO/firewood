@@ -801,22 +801,31 @@ pub struct WALConfig {
     pub(crate) max_revisions: u32,
 }
 
+/// Config for the disk buffer.
 #[derive(TypedBuilder, Clone)]
 pub struct DiskBufferConfig {
+    /// Maximum buffered disk buffer commands.
     #[builder(default = 4096)]
     pub(crate) max_buffered: usize,
-    #[builder(default = 4096)]
+    /// Maximum number of pending pages.
+    #[builder(default = 65536)] // 256MB total size by default
     max_pending: usize,
-    #[builder(default = 128)]
+    /// Maximum number of concurrent async I/O requests.
+    #[builder(default = 1024)]
     max_aio_requests: u32,
+    /// Maximum number of async I/O responses that it polls for at a time.
     #[builder(default = 128)]
     max_aio_response: u16,
+    /// Maximum number of async I/O requests per submission.
     #[builder(default = 128)]
     max_aio_submit: usize,
-    #[builder(default = 32)]
+    /// Maximum number of concurrent async I/O requests in WAL.
+    #[builder(default = 256)]
     wal_max_aio_requests: usize,
+    /// Maximum buffered WAL records.
     #[builder(default = 1024)]
     wal_max_buffered: usize,
+    /// Maximum batched WAL records per write.
     #[builder(default = 4096)]
     wal_max_batch: usize,
 }

@@ -5,13 +5,8 @@ fn main() {
     let matches = command!()
         .arg(Arg::new("INPUT").help("db path name").required(false).index(1))
         .get_matches();
-    let cfg = DBConfig::builder()
-        .meta_ncached_pages(1024)
-        .meta_ncached_files(128)
-        .compact_ncached_pages(1024)
-        .compact_ncached_files(128);
     let path = get_db_path(matches);
-    let db = DB::new(path.unwrap().as_str(), &cfg.truncate(false).build()).unwrap();
+    let db = DB::new(path.unwrap().as_str(), &DBConfig::builder().truncate(false).build()).unwrap();
     let mut stdout = std::io::stdout();
     println!("== Account Model ==");
     db.dump(&mut stdout).unwrap();
@@ -27,12 +22,7 @@ fn get_db_path(matches: ArgMatches) -> Result<String, DBError> {
     }
 
     // Build and provide a new db path
-    let cfg = DBConfig::builder()
-        .meta_ncached_pages(1024)
-        .meta_ncached_files(128)
-        .compact_ncached_pages(1024)
-        .compact_ncached_files(128)
-        .wal(WALConfig::builder().max_revisions(10).build());
+    let cfg = DBConfig::builder().wal(WALConfig::builder().max_revisions(10).build());
     let db = DB::new("simple_db", &cfg.truncate(true).build()).unwrap();
     db.new_writebatch()
         .set_balance(b"ted", 10.into())

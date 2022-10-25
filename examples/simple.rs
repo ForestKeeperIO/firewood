@@ -23,12 +23,7 @@ fn print_states(db: &DB) {
 }
 
 fn main() {
-    let cfg = DBConfig::builder()
-        .meta_ncached_pages(1024)
-        .meta_ncached_files(128)
-        .compact_ncached_pages(1024)
-        .compact_ncached_files(128)
-        .wal(WALConfig::builder().max_revisions(10).build());
+    let cfg = DBConfig::builder().wal(WALConfig::builder().max_revisions(10).build());
     {
         let db = DB::new("simple_db", &cfg.clone().truncate(true).build()).unwrap();
         db.new_writebatch()
