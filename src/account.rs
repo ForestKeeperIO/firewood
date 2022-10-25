@@ -33,8 +33,8 @@ impl Account {
         buff.extend(self.nonce.to_le_bytes());
         buff.resize(40, 0);
         self.balance.to_big_endian(&mut buff[8..40]);
-        buff.extend((self.root.addr() as u64).to_le_bytes());
-        buff.extend((self.code.addr() as u64).to_le_bytes());
+        buff.extend((self.root.addr()).to_le_bytes());
+        buff.extend((self.code.addr()).to_le_bytes());
         buff.extend(self.root_hash.0);
         buff.extend(self.code_hash.0);
         buff
@@ -117,7 +117,7 @@ impl MummyItem for Blob {
             Self::Code(code) => {
                 let mut cur = Cursor::new(to);
                 cur.write_all(&(code.len() as u32).to_le_bytes()).unwrap();
-                cur.write_all(&code).unwrap();
+                cur.write_all(code).unwrap();
             }
         }
     }

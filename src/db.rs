@@ -95,8 +95,8 @@ impl SubSpace<StoreRevShared> {
 impl SubSpace<Rc<dyn MemStoreR>> {
     fn rewind(&self, meta_writes: &[SpaceWrite], payload_writes: &[SpaceWrite]) -> SubSpace<StoreRevShared> {
         SubSpace::new(
-            StoreRevShared::from_ash(self.meta.clone(), &meta_writes),
-            StoreRevShared::from_ash(self.payload.clone(), &payload_writes),
+            StoreRevShared::from_ash(self.meta.clone(), meta_writes),
+            StoreRevShared::from_ash(self.payload.clone(), payload_writes),
         )
     }
 }
@@ -230,7 +230,7 @@ impl DBRev {
 
     fn get_account(&self, key: &[u8]) -> Result<Account, DBError> {
         Ok(match self.merkle.get(key, self.header.acc_root) {
-            Ok(Some(bytes)) => Account::deserialize(&*bytes),
+            Ok(Some(bytes)) => Account::deserialize(&bytes),
             Ok(None) => Account::default(),
             Err(e) => return Err(DBError::Merkle(e)),
         })
@@ -242,7 +242,7 @@ impl DBRev {
             Ok(None) => Account::default(),
             Err(e) => return Err(DBError::Merkle(e)),
         };
-        write!(w, "{:?}\n", acc).unwrap();
+        writeln!(w, "{:?}", acc).unwrap();
         if !acc.root.is_null() {
             self.merkle.dump(acc.root, w).map_err(DBError::Merkle)?;
         }
@@ -340,7 +340,7 @@ impl DB {
             let mut magic = [0; 16];
             magic[..MAGIC_STR.len()].copy_from_slice(MAGIC_STR);
             let header = DBParams {
-                magic: magic,
+                magic,
                 meta_file_nbit: cfg.meta_file_nbit,
                 compact_file_nbit: cfg.compact_file_nbit,
                 compact_regn_nbit: cfg.compact_regn_nbit,
@@ -749,7 +749,10 @@ impl<'a> WriteBatch<'a> {
     }
 
     pub fn set_balance(&mut self, key: &[u8], balance: U256) -> Result<&mut Self, DBError> {
-        self.change_account(key, |acc, _| Ok(acc.balance = balance))?;
+        self.change_account(key, |acc, _| {
+            acc.balance = balance;
+            Ok(())
+        })?;
         Ok(self)
     }
 

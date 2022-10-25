@@ -1547,7 +1547,7 @@ impl<'a> RefMut<'a> {
         Ref(self.merkle.get_node(self.ptr).unwrap())
     }
 
-    pub fn write(&mut self, modify: impl FnOnce(&mut Vec<u8>) -> ()) -> Result<(), MerkleError> {
+    pub fn write(&mut self, modify: impl FnOnce(&mut Vec<u8>)) -> Result<(), MerkleError> {
         let mut deleted = Vec::new();
         {
             let mut u_ref = self.merkle.get_node(self.ptr).unwrap();
