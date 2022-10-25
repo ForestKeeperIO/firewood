@@ -53,16 +53,16 @@
 //!
 //! - "Validation" Storage: this regime optimizes for the storage footprint and the performance of
 //!   operations upon the latest state. With the assumption that the chain's global (world) state
-//!   size is relatively stable over ever-coming blocks, one can just make the latest state persisted and
-//!   available to the blockchain system as that's what matters for most of the time. While one can
-//!   still keep some volatile state revisions in-memory for calculation and VM execution, the
-//!   final commit to some state works on a singleton so the indexed merkle tries may be typically
-//!   updated in place. It is also possible (e.g., firewood) to allow some infrequent access to
-//!   historical revisions with higher cost, and/or allow fast access to revisions of the store
-//!   within certain limited recency. This style of storage is useful for the blockchain systems
-//!   where only (or mostly) the latest state is required and data footprint should be minimized if
-//!   possible for sustainability. Validators who directly participates in the consensus and vote
-//!   for the blocks, for example, can largely benefit from such a design.
+//!   size is relatively stable over ever-coming blocks, one can just make the latest state
+//!   persisted and available to the blockchain system as that's what matters for most of the time.
+//!   While one can still keep some volatile state revisions in-memory for calculation and VM
+//!   execution, the final commit to some state works on a singleton so the indexed merkle tries
+//!   may be typically updated in place. It is also possible (e.g., firewood) to allow some
+//!   infrequent access to historical revisions with higher cost, and/or allow fast access to
+//!   revisions of the store within certain limited recency. This style of storage is useful for
+//!   the blockchain systems where only (or mostly) the latest state is required and data footprint
+//!   should be minimized if possible for sustainability. Validators who directly participates in
+//!   the consensus and vote for the blocks, for example, can largely benefit from such a design.
 //!
 //! In firewood, we take a closer look at the second regime and have come up with a simple but
 //! solid design that fulfills the need for such blockchain storage.
@@ -125,14 +125,14 @@
 //! interval writes are fed into the WAL subsystem (supported by `growthring`). After the WAL
 //! record is written (one record per write batch), the dirty pages are then pushed to the on-disk
 //! linear space to mirror the change by some asynchronous, out-of-order file writes. See the
-//! `BufferCmd::WriteBatch` part of `DiskBuffer:: process` for the detailed logic.
+//! `BufferCmd::WriteBatch` part of `DiskBuffer::process` for the detailed logic.
 //!
 //! In short, a Read-Modify-Write (RMW) style normal operation flow is as follows in Firewood:
 //!
 //! - Traverse the MPT, and that induces the access to the nodes. Suppose the nodes are not already in
 //!   memory, then:
 //!
-//! - Bring the necessary pages that contains the accessed nodes into the memory and cache them
+//! - Bring the necessary pages that contain the accessed nodes into the memory and cache them
 //!   (`storage::CachedSpace`).
 //!
 //! - Make changes to the MPT, and that induces the writes to the nodes. The nodes are either
