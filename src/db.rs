@@ -708,15 +708,16 @@ pub struct WriteBatch<'a> {
 }
 
 impl<'a> WriteBatch<'a> {
-    pub fn kv_insert<K: AsRef<[u8]>>(&mut self, key: K, val: Vec<u8>) -> Result<&mut Self, DBError> {
+    pub fn kv_insert<K: AsRef<[u8]>>(mut self, key: K, val: Vec<u8>) -> Result<Self, DBError> {
         let (header, merkle, _) = self.m.latest.borrow_split();
         merkle.insert(key, val, header.kv_root).map_err(DBError::Merkle)?;
         Ok(self)
     }
 
-    pub fn kv_remove<K: AsRef<[u8]>>(&mut self, key: K) -> Result<Option<Vec<u8>>, DBError> {
+    pub fn kv_remove<K: AsRef<[u8]>>(mut self, key: K, val: &mut Option<Vec<u8>>) -> Result<Self, DBError> {
         let (header, merkle, _) = self.m.latest.borrow_split();
-        merkle.remove(key, header.kv_root).map_err(DBError::Merkle)
+        *val = merkle.remove(key, header.kv_root).map_err(DBError::Merkle)?;
+        Ok(self)
     }
 
     fn change_account(
@@ -750,7 +751,7 @@ impl<'a> WriteBatch<'a> {
         Ok(())
     }
 
-    pub fn set_balance(&mut self, key: &[u8], balance: U256) -> Result<&mut Self, DBError> {
+    pub fn set_balance(mut self, key: &[u8], balance: U256) -> Result<Self, DBError> {
         self.change_account(key, |acc, _| {
             acc.balance = balance;
             Ok(())
@@ -758,7 +759,7 @@ impl<'a> WriteBatch<'a> {
         Ok(self)
     }
 
-    pub fn set_code(&mut self, key: &[u8], code: &[u8]) -> Result<&mut Self, DBError> {
+    pub fn set_code(mut self, key: &[u8], code: &[u8]) -> Result<Self, DBError> {
         use sha3::Digest;
         self.change_account(key, |acc, blob_stash| {
             if !acc.code.is_null() {
@@ -775,12 +776,12 @@ impl<'a> WriteBatch<'a> {
         Ok(self)
     }
 
-    pub fn set_nonce(&mut self, key: &[u8], nonce: u64) -> Result<&mut Self, DBError> {
+    pub fn set_nonce(mut self, key: &[u8], nonce: u64) -> Result<Self, DBError> {
         self.change_account(key, |acc, _| Ok(acc.nonce = nonce))?;
         Ok(self)
     }
 
-    pub fn set_state(&mut self, key: &[u8], sub_key: &[u8], val: Vec<u8>) -> Result<&mut Self, DBError> {
+    pub fn set_state(mut self, key: &[u8], sub_key: &[u8], val: Vec<u8>) -> Result<Self, DBError> {
         let (header, merkle, _) = self.m.latest.borrow_split();
         let mut acc = match merkle.get(key, header.acc_root) {
             Ok(Some(r)) => Account::deserialize(&*r),
@@ -798,7 +799,7 @@ impl<'a> WriteBatch<'a> {
         Ok(self)
     }
 
-    pub fn create_account(&mut self, key: &[u8]) -> Result<&mut Self, DBError> {
+    pub fn create_account(mut self, key: &[u8]) -> Result<Self, DBError> {
         let (header, merkle, _) = self.m.latest.borrow_split();
         let old_balance = match merkle.get_mut(key, header.acc_root) {
             Ok(Some(bytes)) => Account::deserialize(&*bytes.get()).balance,
@@ -813,27 +814,31 @@ impl<'a> WriteBatch<'a> {
         Ok(self)
     }
 
-    pub fn delete_account(&mut self, key: &[u8]) -> Result<Option<Account>, DBError> {
+    pub fn delete_account(mut self, key: &[u8], acc: &mut Option<Account>) -> Result<Self, DBError> {
         let (header, merkle, blob_stash) = self.m.latest.borrow_split();
-        let mut acc = match merkle.remove(key, header.acc_root) {
+        let mut a = match merkle.remove(key, header.acc_root) {
             Ok(Some(bytes)) => Account::deserialize(&bytes),
-            Ok(None) => return Ok(None),
+            Ok(None) => {
+                *acc = None;
+                return Ok(self)
+            }
             Err(e) => return Err(DBError::Merkle(e)),
         };
-        if !acc.root.is_null() {
-            merkle.remove_tree(acc.root).map_err(DBError::Merkle)?;
-            acc.root = ObjPtr::null();
+        if !a.root.is_null() {
+            merkle.remove_tree(a.root).map_err(DBError::Merkle)?;
+            a.root = ObjPtr::null();
         }
-        if !acc.code.is_null() {
-            blob_stash.free_blob(acc.code).map_err(DBError::Blob)?;
-            acc.code = ObjPtr::null();
+        if !a.code.is_null() {
+            blob_stash.free_blob(a.code).map_err(DBError::Blob)?;
+            a.code = ObjPtr::null();
         }
-        Ok(Some(acc))
+        *acc = Some(a);
+        Ok(self)
     }
 
     /// Do not rehash merkle roots. This will leave the recalculation of the dirty root hashes to
     /// future invocation of `root_hash`, `kv_root_hash` or batch commits.
-    pub fn no_root_hash(&mut self) -> &mut Self {
+    pub fn no_root_hash(mut self) -> Self {
         self.root_hash_recalc = false;
         self
     }

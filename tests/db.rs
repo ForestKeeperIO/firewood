@@ -51,7 +51,7 @@ fn test_revisions() {
                 for _ in 0..m {
                     let key = keygen();
                     let val: Vec<u8> = (0..8).map(|_| rng.borrow_mut().gen()).collect();
-                    wb.kv_insert(key, val.to_vec()).unwrap();
+                    wb = wb.kv_insert(key, val.to_vec()).unwrap();
                 }
                 wb.commit();
             }

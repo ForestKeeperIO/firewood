@@ -34,14 +34,17 @@ fn get_db_path(matches: ArgMatches) -> Result<String, DBError> {
         .compact_ncached_files(128)
         .wal(WALConfig::builder().max_revisions(10).build());
     let db = DB::new("simple_db", &cfg.truncate(true).build()).unwrap();
-    {
-        let mut wb = db.new_writebatch();
-        wb.set_balance(b"ted", 10.into()).unwrap();
-        wb.set_code(b"ted", b"smart contract byte code here!").unwrap();
-        wb.set_nonce(b"ted", 10086).unwrap();
-        wb.set_state(b"ted", b"x", b"1".to_vec()).unwrap();
-        wb.set_state(b"ted", b"y", b"2".to_vec()).unwrap();
-        wb.commit();
-    }
+    db.new_writebatch()
+        .set_balance(b"ted", 10.into())
+        .unwrap()
+        .set_code(b"ted", b"smart contract byte code here!")
+        .unwrap()
+        .set_nonce(b"ted", 10086)
+        .unwrap()
+        .set_state(b"ted", b"x", b"1".to_vec())
+        .unwrap()
+        .set_state(b"ted", b"y", b"2".to_vec())
+        .unwrap()
+        .commit();
     Ok("simple_db".to_string())
 }

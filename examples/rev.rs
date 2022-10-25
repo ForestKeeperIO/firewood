@@ -18,9 +18,10 @@ fn main() {
             ("ddd", "ok"),
         ];
         for (k, v) in items.iter() {
-            let mut wb = db.new_writebatch();
-            wb.kv_insert(k, v.as_bytes().to_vec()).unwrap();
-            wb.commit();
+            db.new_writebatch()
+                .kv_insert(k, v.as_bytes().to_vec())
+                .unwrap()
+                .commit();
             println!("{}", hex::encode(*db.kv_root_hash().unwrap()));
         }
         db.kv_dump(&mut std::io::stdout()).unwrap();
