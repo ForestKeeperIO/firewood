@@ -45,13 +45,7 @@ that the database size is small and stable during the course of running
 firewood. Firewood exists to provide a very fast storage layer for [qEVM](https:
 //github.com/ava-labs/qevm) to use in a custom subnet.
 
-Firewood is a robust database, that provides crash recovery via a
-write-ahead-log (WAL). The WAL guarantees atomicity in the database, by
-batching writes and treating reads separately. The data on disk is compact and
-well organized. It uses Merkle-Patricia tries to store data, with path
-compression enabled.
-
-## Building
+## Build
 Firewood currently is Linux-only, as it has a dependency on the asynchronous
 I/O provided by the Linux kernel (see `libaio`). Unfortunately, Docker is not
 able to successfully emulate the syscalls `libaio` relies on, so Linux or a
@@ -62,12 +56,12 @@ for async I/O) and Windows. Please contact us if you're interested in such contr
 Firewood is written in stable Rust, but relies on the Rust nightly toolchain
 for code linting/formatting.
 
-## Running
+## Run
 There are several examples, in the examples directory, that simulate real world
 use-cases. Try running them via the command-line, via `cargo run --release
 --example simple`.
 
-## Testing
+## Test
 ```
 cargo test --release
 ```
