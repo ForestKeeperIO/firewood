@@ -2,28 +2,28 @@
 //!
 //! Firewood is an embedded key-value store, optimized to store blockchain state. It prioritizes
 //! access to latest state, by providing extremely fast reads, but also provides a limited view
-//! into past state. It does not copy-on-write the (Merkle Patricia Trie) MPT to generate an ever
+//! into past state. It does not copy-on-write the Merkle Patricia Trie (MPT) to generate an ever
 //! growing forest of tries like EVM, but instead keeps one latest version of the MPT index on disk
 //! and apply in-place updates to it. This ensures that the database size is small and stable
 //! during the course of running firewood. Firewood was first conceived to provide a very fast
 //! storage layer for qEVM to enable a fast, complete EVM system with right design choices made
 //! totally from scratch, but it also serves as a drop-in replacement for any EVM-compatible
-//! blockchain storage system, and fits for the generic use of a certified key-value store of
+//! blockchain storage system, and fits for the general use of a certified key-value store of
 //! arbitrary data.
 //!
-//! Firewood is a robust database implemented from the ground up to directly stores MPT nodes and
+//! Firewood is a robust database implemented from the ground up to directly store MPT nodes and
 //! user data. Unlike most (if not all) of the solutions in the field, it is not built on top of a
 //! generic KV store such as LevelDB/RocksDB. Like a B+-tree based store, firewood directly uses
-//! MPT as the index on disk. Thus, there is no additional "emulation" of the logical MPT to
-//! flatten out the data structure to be stored in the underlying DB that is unaware of the
-//! locality.
+//! the tree structure as the index on disk. Thus, there is no additional "emulation" of the
+//! logical MPT to flatten out the data structure to feed into the underlying DB that is unaware
+//! of the data being stored.
 //!
-//! Firewood provides OS-level crash recovery via a write-ahead-log (WAL). The WAL guarantees
+//! Firewood provides OS-level crash recovery via a write-ahead log (WAL). The WAL guarantees
 //! atomicity and durability in the database, but also offers "reversibility": some portion
-//! of the old WAL can be optionally kept and pruned to allow a fast in-memory rollback to recover
-//! some past revisions of the entire store on-the-fly. While running the store, new changes will
-//! also maintain the configured window of changes (batch-granularity) to access any past revisions
-//! with no cost at all.
+//! of the old WAL can be optionally kept around to allow a fast in-memory rollback to recover
+//! some past versions of the entire store back in memory. While running the store, new changes
+//! will also contribute to the configured window of changes (at batch granularity) to access any past
+//! versions with no additional cost at all.
 //!
 //! The on-disk footprint of Firewood is more compact than geth. It provides two isolated storage
 //! space which can be both or selectively used the user. The account model portion of the storage
@@ -35,46 +35,46 @@
 //!
 //! # Design Philosophy & Overview
 //!
-//! With some on-going academic research efforts and increasing demand of faster blockchain
-//! local storage solutions for the chain state, we realized there are mainly two different
-//! regimes in design.
+//! With some on-going academic research efforts and increasing demand of faster local storage
+//! solutions for the chain state, we realized there are mainly two different regimes of designs.
 //!
 //! - "Archival" Storage: this style of design emphasizes on the ability to hold all historical
 //!   data and retrieve a revision of any wold state at a reasonable performance. To economically
 //!   store all historical certified data, usually copy-on-write merkle tries are used to just
-//!   capture the changes made to the state. The entire storage will be made of a forest of these
-//!   delta tries. The total size of the storage will keep growing over time and an ideal,
+//!   capture the changes made by a committed block. The entire storage consists of a forest of these
+//!   "delta" tries. The total size of the storage will keep growing over the chain length and an ideal,
 //!   well-executed plan for this is to make sure the performance degradation is reasonable or
-//!   well-contained with respect to the increasing size of the storage. It is useful in archival
-//!   nodes which serve as the backend for some indexing service (e.g. chain explorer) or as a
+//!   well-contained with respect to the ever-increasing size of the index. This design is useful
+//!   for nodes which serve as the backend for some indexing service (e.g. chain explorer) or as a
 //!   query portal to some user agent (e.g. wallet apps). Blockchains with poor finality may also
 //!   need this because the "canonical" branch of the chain could switch (but not necessarily a
 //!   practical concern nowadays) to a different fork at times.
 //!
 //! - "Validation" Storage: this regime optimizes for the storage footprint and the performance of
-//!   operations upon the latest state. With the assumption that the chain's global (world) state
+//!   operations upon the latest/recent states. With the assumption that the chain's total state
 //!   size is relatively stable over ever-coming blocks, one can just make the latest state
 //!   persisted and available to the blockchain system as that's what matters for most of the time.
-//!   While one can still keep some volatile state revisions in-memory for calculation and VM
+//!   While one can still keep some volatile state versions in memory for mutation and VM
 //!   execution, the final commit to some state works on a singleton so the indexed merkle tries
 //!   may be typically updated in place. It is also possible (e.g., firewood) to allow some
-//!   infrequent access to historical revisions with higher cost, and/or allow fast access to
-//!   revisions of the store within certain limited recency. This style of storage is useful for
+//!   infrequent access to historical versions with higher cost, and/or allow fast access to
+//!   versions of the store within certain limited recency. This style of storage is useful for
 //!   the blockchain systems where only (or mostly) the latest state is required and data footprint
-//!   should be minimized if possible for sustainability. Validators who directly participates in
-//!   the consensus and vote for the blocks, for example, can largely benefit from such a design.
+//!   should remain constant or grow slowly if possible for sustainability. Validators who
+//!   directly participate in the consensus and vote for the blocks, for example, can largely
+//!   benefit from such a design.
 //!
 //! In firewood, we take a closer look at the second regime and have come up with a simple but
-//! solid design that fulfills the need for such blockchain storage.
+//! robust architecture that fulfills the need for such blockchain storage.
 //!
 //! ## Storage Model
 //!
 //! Firewood is built by three layers of abstractions that totally decouple the
-//! layout/representation of the data on disk from the actual logical data structure it mains:
+//! layout/representation of the data on disk from the actual logical data structure it retains:
 //!
-//! - Linear, memory-like space: the `shale` crate from some academic project (CedrusDB) code
-//!   offers an abstraction for a (64-bit) byte-addressable space that abstracts way the intricate
-//!   methods to actually persist the in-memory data on the secondary storage medium (e.g., hard
+//! - Linear, memory-like space: the `shale` crate from an academic project (CedrusDB) code
+//!   offers an abstraction for a (64-bit) byte-addressable space that abstracts away the intricate
+//!   method that actually persists the in-memory data on the secondary storage medium (e.g., hard
 //!   drive) named `MemStore`. The implementor of `MemStore` will provide the functions to give the
 //!   user of `MemStore` an illusion as if the user is operating upon a byte-addressable memory
 //!   space. In short, it is just a "magical" array of bytes one can view and change that also
