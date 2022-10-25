@@ -53,10 +53,10 @@ fn main() {
                     for batch in workload.iter() {
                         let mut wb = db.new_writebatch();
                         for (k, v) in batch {
-                            wb.kv_insert(k, v.clone()).unwrap();
+                            wb = wb.kv_insert(k, v.clone()).unwrap();
                         }
                         if !root_hash {
-                            wb.no_root_hash();
+                            wb = wb.no_root_hash();
                         }
                         wb.commit();
                     }
