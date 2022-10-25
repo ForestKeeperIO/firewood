@@ -446,18 +446,15 @@ impl DB {
         disk_requester.init_wal("wal", db_fd);
 
         // set up the storage layout
+        let db_header: ObjPtr<DBHeader>;
         let merkle_payload_header: ObjPtr<CompactSpaceHeader>;
-        let merkle_header: ObjPtr<DBHeader>;
         let blob_payload_header: ObjPtr<CompactSpaceHeader>;
         unsafe {
-            // Merkle CompactHeader starts after DBParams in merkle meta space
+            db_header = ObjPtr::new_from_addr(offset);
+            offset += DBHeader::MSIZE;
             merkle_payload_header = ObjPtr::new_from_addr(offset);
             offset += CompactSpaceHeader::MSIZE;
-            // DBHeader starts after CompactHeader in merkle meta space
-            merkle_header = ObjPtr::new_from_addr(offset);
-            offset += DBHeader::MSIZE;
             assert!(offset <= SPACE_RESERVED);
-            // Blob CompactSpaceHeader starts right in blob meta space
             blob_payload_header = ObjPtr::new_from_addr(0);
         }
 
@@ -470,25 +467,25 @@ impl DB {
             staging
                 .merkle
                 .meta
-                .write(merkle_header.addr(), &shale::to_dehydrated(&DBHeader::new_empty()));
+                .write(db_header.addr(), &shale::to_dehydrated(&DBHeader::new_empty()));
             staging.blob.meta.write(
                 blob_payload_header.addr(),
                 &shale::to_dehydrated(&shale::compact::CompactSpaceHeader::new(SPACE_RESERVED, SPACE_RESERVED)),
             );
         }
 
-        let (merkle_payload_header_ref, mut merkle_header_ref, blob_payload_header_ref) = unsafe {
+        let (mut db_header_ref, merkle_payload_header_ref, blob_payload_header_ref) = unsafe {
             let merkle_meta_ref = staging.merkle.meta.as_ref() as &dyn MemStore;
             let blob_meta_ref = staging.blob.meta.as_ref() as &dyn MemStore;
 
             (
+                MummyObj::ptr_to_obj(merkle_meta_ref, db_header, DBHeader::MSIZE).unwrap(),
                 MummyObj::ptr_to_obj(
                     merkle_meta_ref,
                     merkle_payload_header,
                     shale::compact::CompactHeader::MSIZE,
                 )
                 .unwrap(),
-                MummyObj::ptr_to_obj(merkle_meta_ref, merkle_header, DBHeader::MSIZE).unwrap(),
                 MummyObj::ptr_to_obj(blob_meta_ref, blob_payload_header, shale::compact::CompactHeader::MSIZE).unwrap(),
             )
         };
@@ -513,10 +510,10 @@ impl DB {
         )
         .unwrap();
 
-        if merkle_header_ref.acc_root.is_null() {
+        if db_header_ref.acc_root.is_null() {
             let mut err = Ok(());
             // create the sentinel node
-            merkle_header_ref
+            db_header_ref
                 .write(|r| {
                     err = (|| {
                         Merkle::init_root(&mut r.acc_root, &merkle_space)?;
@@ -528,7 +525,7 @@ impl DB {
         }
 
         let mut latest = DBRev {
-            header: merkle_header_ref,
+            header: db_header_ref,
             merkle: Merkle::new(Box::new(merkle_space)),
             blob: BlobStash::new(Box::new(blob_space)),
         };
@@ -627,31 +624,36 @@ impl DB {
             return None
         }
         // set up the storage layout
+        let db_header: ObjPtr<DBHeader>;
         let merkle_payload_header: ObjPtr<CompactSpaceHeader>;
-        let merkle_header: ObjPtr<DBHeader>;
         let blob_payload_header: ObjPtr<CompactSpaceHeader>;
         unsafe {
             let mut offset = std::mem::size_of::<DBParams>() as u64;
+            // DBHeader starts after DBParams in merkle meta space
+            db_header = ObjPtr::new_from_addr(offset);
+            offset += DBHeader::MSIZE;
+            // Merkle CompactHeader starts after DBHeader in merkle meta space
             merkle_payload_header = ObjPtr::new_from_addr(offset);
             offset += CompactSpaceHeader::MSIZE;
-            merkle_header = ObjPtr::new_from_addr(offset);
+            assert!(offset <= SPACE_RESERVED);
+            // Blob CompactSpaceHeader starts right in blob meta space
             blob_payload_header = ObjPtr::new_from_addr(0);
         }
 
         let space = &inner.revisions[nback - 1];
 
-        let (merkle_payload_header_ref, merkle_header_ref, blob_payload_header_ref) = unsafe {
+        let (db_header_ref, merkle_payload_header_ref, blob_payload_header_ref) = unsafe {
             let merkle_meta_ref = &space.merkle.meta as &dyn MemStore;
             let blob_meta_ref = &space.blob.meta as &dyn MemStore;
 
             (
+                MummyObj::ptr_to_obj(merkle_meta_ref, db_header, DBHeader::MSIZE).unwrap(),
                 MummyObj::ptr_to_obj(
                     merkle_meta_ref,
                     merkle_payload_header,
                     shale::compact::CompactHeader::MSIZE,
                 )
                 .unwrap(),
-                MummyObj::ptr_to_obj(merkle_meta_ref, merkle_header, DBHeader::MSIZE).unwrap(),
                 MummyObj::ptr_to_obj(blob_meta_ref, blob_payload_header, shale::compact::CompactHeader::MSIZE).unwrap(),
             )
         };
@@ -679,7 +681,7 @@ impl DB {
         Some(Revision {
             _m: inner,
             rev: DBRev {
-                header: merkle_header_ref,
+                header: db_header_ref,
                 merkle: Merkle::new(Box::new(merkle_space)),
                 blob: BlobStash::new(Box::new(blob_space)),
             },
