@@ -31,7 +31,7 @@ pub enum DBError {
 }
 
 #[repr(C)]
-struct DBHeader {
+struct DBParams {
     magic: [u8; 16],
     meta_file_nbit: u64,
     compact_file_nbit: u64,
@@ -110,12 +110,16 @@ impl SubSpace<Rc<CachedSpace>> {
     }
 }
 
-pub struct MerkleHeader {
+/// DB-wide metadata, it keeps track of the roots of the top-level tries.
+struct DBHeader {
+    /// The root node of the account model storage. (Where the values are [Account] objects, which
+    /// may contain the root for the secondary trie.)
     acc_root: ObjPtr<Node>,
+    /// The root node of the generic key-value store.
     kv_root: ObjPtr<Node>,
 }
 
-impl MerkleHeader {
+impl DBHeader {
     pub const MSIZE: u64 = 16;
 
     pub fn new_empty() -> Self {
@@ -126,7 +130,7 @@ impl MerkleHeader {
     }
 }
 
-impl MummyItem for MerkleHeader {
+impl MummyItem for DBHeader {
     fn hydrate(addr: u64, mem: &dyn MemStore) -> Result<Self, shale::ShaleError> {
         let raw = mem
             .get_view(addr, Self::MSIZE)
@@ -188,7 +192,7 @@ impl Universe<Rc<dyn MemStoreR>> {
 }
 
 pub struct DBRev {
-    header: shale::Obj<MerkleHeader>,
+    header: shale::Obj<DBHeader>,
     merkle: Merkle,
     blob: BlobStash,
 }
@@ -200,7 +204,7 @@ impl DBRev {
         self.blob.flush_dirty()
     }
 
-    fn borrow_split(&mut self) -> (&mut shale::Obj<MerkleHeader>, &mut Merkle, &mut BlobStash) {
+    fn borrow_split(&mut self) -> (&mut shale::Obj<DBHeader>, &mut Merkle, &mut BlobStash) {
         (&mut self.header, &mut self.merkle, &mut self.blob)
     }
 
@@ -327,7 +331,7 @@ impl DB {
         let fd0 = file0.get_fd();
 
         if reset {
-            // initialize DBHeader
+            // initialize DBParams
             if cfg.compact_file_nbit < cfg.compact_regn_nbit || cfg.compact_regn_nbit < crate::storage::PAGE_SIZE_NBIT {
                 return Err(DBError::InvalidParams)
             }
@@ -335,7 +339,7 @@ impl DB {
             nix::unistd::ftruncate(fd0, 1 << cfg.meta_file_nbit).map_err(DBError::System)?;
             let mut magic = [0; 16];
             magic[..MAGIC_STR.len()].copy_from_slice(MAGIC_STR);
-            let header = DBHeader {
+            let header = DBParams {
                 magic,
                 meta_file_nbit: cfg.meta_file_nbit,
                 compact_file_nbit: cfg.compact_file_nbit,
@@ -346,12 +350,12 @@ impl DB {
             nix::sys::uio::pwrite(fd0, &shale::util::get_raw_bytes(&header), 0).map_err(DBError::System)?;
         }
 
-        // read DBHeader
-        let mut header_bytes = [0; std::mem::size_of::<DBHeader>()];
+        // read DBParams
+        let mut header_bytes = [0; std::mem::size_of::<DBParams>()];
         nix::sys::uio::pread(fd0, &mut header_bytes, 0).map_err(DBError::System)?;
         drop(file0);
         let mut offset = header_bytes.len() as u64;
-        let header = unsafe { std::mem::transmute::<_, DBHeader>(header_bytes) };
+        let header = unsafe { std::mem::transmute::<_, DBParams>(header_bytes) };
 
         // setup disk buffer
         let cached = Universe {
@@ -443,15 +447,15 @@ impl DB {
 
         // set up the storage layout
         let merkle_payload_header: ObjPtr<CompactSpaceHeader>;
-        let merkle_header: ObjPtr<MerkleHeader>;
+        let merkle_header: ObjPtr<DBHeader>;
         let blob_payload_header: ObjPtr<CompactSpaceHeader>;
         unsafe {
-            // Merkle CompactHeader starts after DBHeader in merkle meta space
+            // Merkle CompactHeader starts after DBParams in merkle meta space
             merkle_payload_header = ObjPtr::new_from_addr(offset);
             offset += CompactSpaceHeader::MSIZE;
-            // MerkleHeader starts after CompactHeader in merkle meta space
+            // DBHeader starts after CompactHeader in merkle meta space
             merkle_header = ObjPtr::new_from_addr(offset);
-            offset += MerkleHeader::MSIZE;
+            offset += DBHeader::MSIZE;
             assert!(offset <= SPACE_RESERVED);
             // Blob CompactSpaceHeader starts right in blob meta space
             blob_payload_header = ObjPtr::new_from_addr(0);
@@ -466,7 +470,7 @@ impl DB {
             staging
                 .merkle
                 .meta
-                .write(merkle_header.addr(), &shale::to_dehydrated(&MerkleHeader::new_empty()));
+                .write(merkle_header.addr(), &shale::to_dehydrated(&DBHeader::new_empty()));
             staging.blob.meta.write(
                 blob_payload_header.addr(),
                 &shale::to_dehydrated(&shale::compact::CompactSpaceHeader::new(SPACE_RESERVED, SPACE_RESERVED)),
@@ -484,7 +488,7 @@ impl DB {
                     shale::compact::CompactHeader::MSIZE,
                 )
                 .unwrap(),
-                MummyObj::ptr_to_obj(merkle_meta_ref, merkle_header, MerkleHeader::MSIZE).unwrap(),
+                MummyObj::ptr_to_obj(merkle_meta_ref, merkle_header, DBHeader::MSIZE).unwrap(),
                 MummyObj::ptr_to_obj(blob_meta_ref, blob_payload_header, shale::compact::CompactHeader::MSIZE).unwrap(),
             )
         };
@@ -624,10 +628,10 @@ impl DB {
         }
         // set up the storage layout
         let merkle_payload_header: ObjPtr<CompactSpaceHeader>;
-        let merkle_header: ObjPtr<MerkleHeader>;
+        let merkle_header: ObjPtr<DBHeader>;
         let blob_payload_header: ObjPtr<CompactSpaceHeader>;
         unsafe {
-            let mut offset = std::mem::size_of::<DBHeader>() as u64;
+            let mut offset = std::mem::size_of::<DBParams>() as u64;
             merkle_payload_header = ObjPtr::new_from_addr(offset);
             offset += CompactSpaceHeader::MSIZE;
             merkle_header = ObjPtr::new_from_addr(offset);
@@ -647,7 +651,7 @@ impl DB {
                     shale::compact::CompactHeader::MSIZE,
                 )
                 .unwrap(),
-                MummyObj::ptr_to_obj(merkle_meta_ref, merkle_header, MerkleHeader::MSIZE).unwrap(),
+                MummyObj::ptr_to_obj(merkle_meta_ref, merkle_header, DBHeader::MSIZE).unwrap(),
                 MummyObj::ptr_to_obj(blob_meta_ref, blob_payload_header, shale::compact::CompactHeader::MSIZE).unwrap(),
             )
         };
