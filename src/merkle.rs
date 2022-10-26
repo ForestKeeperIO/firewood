@@ -169,7 +169,7 @@ impl BranchNode {
                     only_chd = None;
                     break
                 }
-                only_chd = c.clone().map(|e| (e, i as u8))
+                only_chd = (*c).map(|e| (e, i as u8))
             }
         }
         (only_chd, has_chd)
@@ -190,7 +190,7 @@ impl BranchNode {
                         s
                     } else {
                         let c_rlp = &c_ref.get_eth_rlp::<T>(store);
-                        stream.append_raw(&c_rlp, 1)
+                        stream.append_raw(c_rlp, 1)
                     }
                 }
                 None => stream.append_empty_data(),
@@ -240,7 +240,7 @@ impl ExtNode {
                 r.lazy_dirty.set(false)
             }
         } else {
-            stream.append_raw(&r.get_eth_rlp::<T>(store), 1);
+            stream.append_raw(r.get_eth_rlp::<T>(store), 1);
         }
         stream.out().into()
     }
