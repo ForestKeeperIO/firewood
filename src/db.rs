@@ -274,7 +274,7 @@ impl DBRev {
     /// Dump the MPT of the state storage under an account.
     pub fn dump_account(&self, key: &[u8], w: &mut dyn Write) -> Result<(), DBError> {
         let acc = match self.merkle.get(key, self.header.acc_root) {
-            Ok(Some(bytes)) => Account::deserialize(&*bytes),
+            Ok(Some(bytes)) => Account::deserialize(&bytes),
             Ok(None) => Account::default(),
             Err(e) => return Err(DBError::Merkle(e)),
         };
@@ -869,12 +869,14 @@ impl<'a> WriteBatch<'a> {
     pub fn create_account(mut self, key: &[u8]) -> Result<Self, DBError> {
         let (header, merkle, _) = self.m.latest.borrow_split();
         let old_balance = match merkle.get_mut(key, header.acc_root) {
-            Ok(Some(bytes)) => Account::deserialize(&*bytes.get()).balance,
+            Ok(Some(bytes)) => Account::deserialize(&bytes.get()).balance,
             Ok(None) => U256::zero(),
             Err(e) => return Err(DBError::Merkle(e)),
         };
-        let mut acc = Account::default();
-        acc.balance = old_balance;
+        let acc = Account {
+            balance: old_balance,
+            ..Default::default()
+        };
         merkle
             .insert(key, acc.serialize(), header.acc_root)
             .map_err(DBError::Merkle)?;

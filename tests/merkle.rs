@@ -174,16 +174,16 @@ fn test_root_hash_reversed_deletions() {
                 }
                 println!("{} != {}", hex::encode(**h), hex::encode(*h0));
                 println!("== before {} ===", hex::encode(k));
-                print!("{}", prev_dump);
+                print!("{prev_dump}");
                 println!("== after {} ===", hex::encode(k));
                 print!("{}", merkle.dump());
                 println!("== should be ===");
-                print!("{}", d);
+                print!("{d}");
                 panic!();
             }
             prev_dump = merkle.dump();
         }
-        println!("i = {}", i);
+        println!("i = {i}");
     }
 }
 
@@ -234,6 +234,6 @@ fn test_root_hash_random_deletions() {
                 println!("{} != {}", hex::encode(h), hex::encode(*h0));
             }
         }
-        println!("i = {}", i);
+        println!("i = {i}");
     }
 }

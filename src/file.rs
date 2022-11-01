@@ -78,17 +78,12 @@ impl Drop for File {
 pub fn touch_dir(dirname: &str, rootfd: Fd) -> Result<Fd, Errno> {
     use nix::sys::stat::mkdirat;
     if mkdirat(rootfd, dirname, Mode::S_IRUSR | Mode::S_IWUSR | Mode::S_IXUSR).is_err() {
-        let errno = nix::errno::from_i32(nix::errno::errno()).into();
+        let errno = nix::errno::from_i32(nix::errno::errno());
         if errno != nix::errno::Errno::EEXIST {
             return Err(errno)
         }
     }
-    Ok(openat(
-        rootfd,
-        dirname,
-        OFlag::O_DIRECTORY | OFlag::O_PATH,
-        Mode::empty(),
-    )?)
+    openat(rootfd, dirname, OFlag::O_DIRECTORY | OFlag::O_PATH, Mode::empty())
 }
 
 pub fn open_dir(path: &str, truncate: bool) -> Result<(Fd, bool), nix::Error> {

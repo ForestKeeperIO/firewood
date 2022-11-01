@@ -40,7 +40,7 @@ fn main() {
         group.sampling_mode(criterion::SamplingMode::Flat).sample_size(10);
         group.throughput(criterion::Throughput::Elements(total as u64));
         group.bench_with_input(
-            format!("nbatch={} batch_size={}", nbatch, batch_size),
+            format!("nbatch={nbatch} batch_size={batch_size}"),
             &workload,
             |b, workload| {
                 b.iter(|| {

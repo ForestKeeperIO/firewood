@@ -4,8 +4,8 @@ fn print_states(db: &DB) {
     println!("======");
     for account in ["ted", "alice"] {
         let addr = account.as_bytes();
-        println!("{}.balance = {}", account, db.get_balance(addr).unwrap());
-        println!("{}.nonce = {}", account, db.get_nonce(addr).unwrap());
+        println!("{account}.balance = {}", db.get_balance(addr).unwrap());
+        println!("{account}.nonce = {}", db.get_nonce(addr).unwrap());
         println!(
             "{}.code = {}",
             account,
