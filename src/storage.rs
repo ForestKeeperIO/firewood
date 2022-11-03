@@ -60,7 +60,7 @@ impl growthring::wal::Record for AshRecord {
         let mut bytes = Vec::new();
         bytes.extend((self.0.len() as u64).to_le_bytes());
         for (space_id, w) in self.0.iter() {
-            bytes.extend((*space_id as u8).to_le_bytes());
+            bytes.extend((*space_id).to_le_bytes());
             bytes.extend((w.old.len() as u32).to_le_bytes());
             for (sw_old, sw_new) in w.old.iter().zip(w.new.iter()) {
                 bytes.extend(sw_old.offset.to_le_bytes());
@@ -186,7 +186,7 @@ impl StoreDelta {
         create_dirty_pages!(head, tail);
 
         let psize = PAGE_SIZE as usize;
-        for w in writes.into_iter() {
+        for w in writes.iter() {
             let mut l = 0;
             let mut r = deltas.len();
             while r - l > 1 {
@@ -206,9 +206,9 @@ impl StoreDelta {
                 deltas[l].data_mut().copy_from_slice(&data[..psize]);
                 data = &data[psize..];
             }
-            if data.len() > 0 {
+            if !data.is_empty() {
                 l += 1;
-                deltas[l].data_mut()[..data.len()].copy_from_slice(&data);
+                deltas[l].data_mut()[..data.len()].copy_from_slice(data);
             }
         }
         Self(deltas)
@@ -230,7 +230,7 @@ impl fmt::Debug for StoreRev {
         for d in self.delta.iter() {
             write!(f, " 0x{:x}", d.0)?;
         }
-        write!(f, ">\n")
+        writeln!(f, ">")
     }
 }
 
@@ -434,7 +434,7 @@ impl MemStore for StoreRevMut {
                 };
                 for p in s_pid + 1..e_pid {
                     match deltas.get(&p) {
-                        Some(p) => data.extend(&**p),
+                        Some(p) => data.extend(**p),
                         None => data.extend(&self.prev.get_slice(p << PAGE_SIZE_NBIT, PAGE_SIZE)?),
                     };
                 }
@@ -524,7 +524,7 @@ fn test_from_ash() {
     use rand::{rngs::StdRng, Rng, SeedableRng};
     let mut rng = StdRng::seed_from_u64(42);
     let min = rng.gen_range(0..2 * PAGE_SIZE);
-    let max = rng.gen_range(min + 1 * PAGE_SIZE..min + 100 * PAGE_SIZE);
+    let max = rng.gen_range(min + PAGE_SIZE..min + 100 * PAGE_SIZE);
     for _ in 0..2000 {
         let n = 20;
         let mut canvas = Vec::new();
@@ -610,7 +610,7 @@ impl CachedSpace {
 impl CachedSpaceInner {
     fn fetch_page(&mut self, space_id: SpaceID, pid: u64) -> Result<Box<Page>, StoreError> {
         if let Some(p) = self.disk_buffer.get_page(space_id, pid) {
-            return Ok(Box::new((*p).clone()))
+            return Ok(Box::new(*p))
         }
         let file_nbit = self.files.get_file_nbit();
         let file_size = 1 << file_nbit;
@@ -742,7 +742,7 @@ impl FilePool {
             rootfd,
         };
         let f0 = s.get_file(0)?;
-        if let Err(_) = flock(f0.get_fd(), FlockArg::LockExclusiveNonblock) {
+        if flock(f0.get_fd(), FlockArg::LockExclusiveNonblock).is_err() {
             return Err(StoreError::InitError("the store is busy".into()))
         }
         Ok(s)
@@ -908,7 +908,7 @@ impl DiskBuffer {
         match self.pending.entry(page_key) {
             Occupied(mut e) => {
                 let slot = e.get_mut();
-                for notifier in std::mem::replace(&mut slot.writing_notifiers, Vec::new()) {
+                for notifier in std::mem::take(&mut slot.writing_notifiers) {
                     notifier.add_permits(1)
                 }
                 if slot.staging_notifiers.is_empty() {
@@ -957,7 +957,7 @@ impl DiskBuffer {
                             let fid = offset >> file_nbit;
                             nix::sys::uio::pwrite(
                                 file_pool.get_file(fid).map_err(|_| ())?.get_fd(),
-                                &*data,
+                                &data,
                                 (offset & file_mask) as nix::libc::off_t,
                             )
                             .map_err(|_| ())?;
