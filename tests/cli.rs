@@ -9,6 +9,16 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const FIREWOOD: &str = "firewood";
 const FIREWOOD_TEST_DB_NAME: &str = "test_firewood";
 
+// Removes the firewood database on disk
+fn fwdctl_delete_db() -> Result<()> {
+    if let Err(e) = remove_dir_all(FIREWOOD_TEST_DB_NAME) {
+        eprintln!("failed to delete testing dir: {e}");
+        return Err(anyhow!(e))
+    }
+
+    Ok(())
+}
+
 #[test]
 #[serial]
 fn fwdctl_prints_version() -> Result<()> {
@@ -139,10 +149,68 @@ fn fwdctl_delete_successful() -> Result<()> {
     Ok(())
 }
 
-// Removes the firewood database on disk
-fn fwdctl_delete_db() -> Result<()> {
-    if let Err(e) = remove_dir_all(FIREWOOD_TEST_DB_NAME) {
-        eprintln!("failed to delete testing dir: {e}");
+#[test]
+#[serial]
+fn fwdctl_root_hash() -> Result<()> {
+    Command::cargo_bin(PRG)?
+        .arg("create")
+        .arg("--name")
+        .arg(FIREWOOD_TEST_DB_NAME)
+        .assert()
+        .success();
+
+    Command::cargo_bin(PRG)?
+        .arg("insert")
+        .args(["--key", "year"])
+        .args(["--value", "2023"])
+        .args(["--db", FIREWOOD_TEST_DB_NAME])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("year"));
+
+    // Get root
+    Command::cargo_bin(PRG)?
+        .arg("root")
+        .args(["--db", FIREWOOD_TEST_DB_NAME])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty().not());
+
+    if let Err(e) = fwdctl_delete_db() {
+        return Err(anyhow!(e))
+    }
+
+    Ok(())
+}
+
+#[test]
+#[serial]
+fn fwdctl_dump() -> Result<()> {
+    Command::cargo_bin(PRG)?
+        .arg("create")
+        .arg("--name")
+        .arg(FIREWOOD_TEST_DB_NAME)
+        .assert()
+        .success();
+
+    Command::cargo_bin(PRG)?
+        .arg("insert")
+        .args(["--key", "year"])
+        .args(["--value", "2023"])
+        .args(["--db", FIREWOOD_TEST_DB_NAME])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("year"));
+
+    // Get root
+    Command::cargo_bin(PRG)?
+        .arg("dump")
+        .args(["--db", FIREWOOD_TEST_DB_NAME])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty().not());
+
+    if let Err(e) = fwdctl_delete_db() {
         return Err(anyhow!(e))
     }
 

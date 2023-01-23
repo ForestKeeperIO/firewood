@@ -4,8 +4,10 @@ use std::process;
 
 pub mod create;
 pub mod delete;
+pub mod dump;
 pub mod get;
 pub mod insert;
+pub mod root;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -36,6 +38,10 @@ enum Commands {
     Get(get::Options),
     /// Delete values associated with a key
     Delete(delete::Options),
+    /// Display key/value trie root hash
+    Root(root::Options),
+    /// Dump contents of key/value store
+    Dump(dump::Options),
 }
 
 fn main() -> Result<()> {
@@ -68,6 +74,20 @@ fn main() -> Result<()> {
             Ok(_) => Ok(()),
         },
         Commands::Delete(opts) => match delete::run(opts) {
+            Err(e) => {
+                eprintln!("{e}");
+                process::exit(1)
+            }
+            Ok(_) => Ok(()),
+        },
+        Commands::Root(opts) => match root::run(opts) {
+            Err(e) => {
+                eprintln!("{e}");
+                process::exit(1)
+            }
+            Ok(_) => Ok(()),
+        },
+        Commands::Dump(opts) => match dump::run(opts) {
             Err(e) => {
                 eprintln!("{e}");
                 process::exit(1)
