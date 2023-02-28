@@ -8,6 +8,7 @@ use shale::{MemStore, MummyItem, ObjPtr, ObjRef, ShaleError, ShaleStore};
 use std::cell::Cell;
 use std::cmp;
 use std::collections::HashMap;
+use std::error::Error;
 use std::fmt::{self, Debug};
 use std::io::{Cursor, Read, Write};
 
@@ -19,7 +20,24 @@ pub enum MerkleError {
     ReadOnly,
     NotBranchNode,
     Format(std::io::Error),
+    ParentLeafBranch,
+    UnsetInternal,
 }
+
+impl fmt::Display for MerkleError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            MerkleError::Shale(e) => write!(f, "merkle datastore error: {e:?}"),
+            MerkleError::ReadOnly => write!(f, "error: read only"),
+            MerkleError::NotBranchNode => write!(f, "error: node is not a branch node"),
+            MerkleError::Format(e) => write!(f, "format error: {e:?}"),
+            MerkleError::ParentLeafBranch => write!(f, "parent should not be a leaf branch"),
+            MerkleError::UnsetInternal => write!(f, "removing internal node references failed"),
+        }
+    }
+}
+
+impl Error for MerkleError {}
 
 #[derive(PartialEq, Eq, Clone)]
 pub struct Hash(pub [u8; 32]);
