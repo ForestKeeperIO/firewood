@@ -190,6 +190,16 @@ impl WALStoreAIO {
     }
 }
 
+/// Return OS specific open flags for opening files
+/// TODO: Switch to a rust idiomatic directory scanning approach
+/// TODO: This shouldn't need to escape growth-ring (no pub)
+pub fn oflags() -> OFlag {
+    #[cfg(target_os = "linux")]
+    return OFlag::O_DIRECTORY | OFlag::O_PATH;
+    #[cfg(not(target_os = "linux"))]
+    return OFlag::O_DIRECTORY;
+}
+
 #[async_trait(?Send)]
 impl WALStore for WALStoreAIO {
     type FileNameIter = std::vec::IntoIter<String>;
