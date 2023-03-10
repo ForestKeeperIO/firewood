@@ -153,8 +153,8 @@ fn test_partial_path_encoding() {
     }
 }
 
-#[derive(PartialEq, Eq, Clone)]
-struct Data(Vec<u8>);
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct Data(Vec<u8>);
 
 impl std::ops::Deref for Data {
     type Target = [u8];
@@ -254,6 +254,10 @@ impl BranchNode {
         }
     }
 
+    pub fn value(&self) -> &Option<Data> {
+        &self.value
+    }
+
     pub fn chd(&self) -> &[Option<ObjPtr<Node>>; NBRANCH] {
         &self.chd
     }
@@ -291,6 +295,14 @@ impl LeafNode {
 
     pub fn new(path: Vec<u8>, data: Vec<u8>) -> Self {
         LeafNode(PartialPath(path), Data(data))
+    }
+
+    pub fn path(&self) -> &PartialPath {
+        &self.0
+    }
+
+    pub fn data(&self) -> &Data {
+        &self.1
     }
 }
 
