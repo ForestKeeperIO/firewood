@@ -2,9 +2,9 @@
 
 use std::cell::{RefCell, RefMut};
 use std::collections::HashMap;
-use std::fmt;
+use std::fmt::{self, Debug};
 use std::num::NonZeroUsize;
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -24,7 +24,7 @@ pub(crate) const PAGE_SIZE_NBIT: u64 = 12;
 pub(crate) const PAGE_SIZE: u64 = 1 << PAGE_SIZE_NBIT;
 pub(crate) const PAGE_MASK: u64 = PAGE_SIZE - 1;
 
-pub trait MemStoreR {
+pub trait MemStoreR: Debug {
     fn get_slice(&self, offset: u64, length: u64) -> Option<Vec<u8>>;
     fn id(&self) -> SpaceID;
 }
@@ -323,16 +323,20 @@ impl StoreRevShared {
 }
 
 impl MemStore for StoreRevShared {
-    fn get_view(&self, offset: u64, length: u64) -> Option<Box<dyn MemView>> {
+    fn get_view(
+        &self,
+        offset: u64,
+        length: u64,
+    ) -> Option<Box<dyn MemView<DerefReturn = Vec<u8>>>> {
         let data = self.0.get_slice(offset, length)?;
         Some(Box::new(StoreRef { data }))
     }
 
-    fn get_shared(&self) -> Option<Box<dyn Deref<Target = dyn MemStore>>> {
+    fn get_shared(&self) -> Option<Box<dyn DerefMut<Target = dyn MemStore>>> {
         Some(Box::new(StoreShared(self.clone())))
     }
 
-    fn write(&self, _offset: u64, _change: &[u8]) {
+    fn write(&mut self, _offset: u64, _change: &[u8]) {
         // StoreRevShared is a read-only view version of MemStore
         // Writes could be induced by lazy hashing and we can just ignore those
     }
@@ -353,7 +357,13 @@ impl Deref for StoreRef {
     }
 }
 
-impl MemView for StoreRef {}
+impl MemView for StoreRef {
+    type DerefReturn = Vec<u8>;
+
+    fn as_deref(&self) -> Self::DerefReturn {
+        self.deref().to_vec()
+    }
+}
 
 struct StoreShared<S: Clone + MemStore>(S);
 
@@ -364,12 +374,19 @@ impl<S: Clone + MemStore + 'static> Deref for StoreShared<S> {
     }
 }
 
+impl<S: Clone + MemStore + 'static> DerefMut for StoreShared<S> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+#[derive(Debug)]
 struct StoreRevMutDelta {
     pages: HashMap<u64, Box<Page>>,
     plain: Ash,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct StoreRevMut {
     prev: Rc<dyn MemStoreR>,
     deltas: Rc<RefCell<StoreRevMutDelta>>,
@@ -419,7 +436,11 @@ impl StoreRevMut {
 }
 
 impl MemStore for StoreRevMut {
-    fn get_view(&self, offset: u64, length: u64) -> Option<Box<dyn MemView>> {
+    fn get_view(
+        &self,
+        offset: u64,
+        length: u64,
+    ) -> Option<Box<dyn MemView<DerefReturn = Vec<u8>>>> {
         let data = if length == 0 {
             Vec::new()
         } else {
@@ -458,11 +479,11 @@ impl MemStore for StoreRevMut {
         Some(Box::new(StoreRef { data }))
     }
 
-    fn get_shared(&self) -> Option<Box<dyn Deref<Target = dyn MemStore>>> {
+    fn get_shared(&self) -> Option<Box<dyn DerefMut<Target = dyn MemStore>>> {
         Some(Box::new(StoreShared(self.clone())))
     }
 
-    fn write(&self, offset: u64, mut change: &[u8]) {
+    fn write(&mut self, offset: u64, mut change: &[u8]) {
         let length = change.len() as u64;
         let end = offset + length - 1;
         let s_pid = offset >> PAGE_SIZE_NBIT;
@@ -508,7 +529,7 @@ impl MemStore for StoreRevMut {
 }
 
 #[cfg(test)]
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ZeroStore(Rc<()>);
 
 #[cfg(test)]
@@ -553,13 +574,16 @@ fn test_from_ash() {
         let z = Rc::new(ZeroStore::new());
         let rev = StoreRevShared::from_ash(z, &writes);
         println!("{rev:?}");
-        assert_eq!(&**rev.get_view(min, max - min).unwrap(), &canvas);
+        assert_eq!(
+            rev.get_view(min, max - min).as_deref().unwrap().as_deref(),
+            canvas
+        );
         for _ in 0..2 * n {
             let l = rng.gen_range(min..max);
             let r = rng.gen_range(l + 1..max);
             assert_eq!(
-                &**rev.get_view(l, r - l).unwrap(),
-                &canvas[(l - min) as usize..(r - min) as usize]
+                rev.get_view(l, r - l).as_deref().unwrap().as_deref(),
+                canvas[(l - min) as usize..(r - min) as usize]
             );
         }
     }
@@ -575,6 +599,7 @@ pub struct StoreConfig {
     rootfd: Fd,
 }
 
+#[derive(Debug)]
 struct CachedSpaceInner {
     cached_pages: lru::LruCache<u64, Box<Page>>,
     pinned_pages: HashMap<u64, (usize, Box<Page>)>,
@@ -582,7 +607,7 @@ struct CachedSpaceInner {
     disk_buffer: DiskBufferRequester,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct CachedSpace {
     inner: Rc<RefCell<CachedSpaceInner>>,
     space_id: SpaceID,
@@ -744,6 +769,7 @@ impl MemStoreR for CachedSpace {
     }
 }
 
+#[derive(Debug)]
 pub struct FilePool {
     files: parking_lot::Mutex<lru::LruCache<u64, Arc<File>>>,
     file_nbit: u64,
@@ -1164,7 +1190,7 @@ impl DiskBuffer {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DiskBufferRequester {
     sender: mpsc::Sender<BufferCmd>,
 }

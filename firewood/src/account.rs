@@ -97,15 +97,15 @@ pub enum Blob {
 
 impl MummyItem for Blob {
     // currently there is only one variant of Blob: Code
-    fn hydrate(addr: u64, mem: &dyn MemStore) -> Result<Self, ShaleError> {
+    fn hydrate<T: MemStore>(addr: u64, mem: &T) -> Result<Self, ShaleError> {
         let raw = mem
             .get_view(addr, 4)
             .ok_or(ShaleError::LinearMemStoreError)?;
-        let len = u32::from_le_bytes(raw[..].try_into().unwrap()) as u64;
+        let len = u32::from_le_bytes(raw.as_deref()[..].try_into().unwrap()) as u64;
         let bytes = mem
             .get_view(addr + 4, len)
             .ok_or(ShaleError::LinearMemStoreError)?;
-        Ok(Self::Code(bytes.to_vec()))
+        Ok(Self::Code(bytes.as_deref().into()))
     }
 
     fn dehydrated_len(&self) -> u64 {
