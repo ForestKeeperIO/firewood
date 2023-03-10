@@ -21,13 +21,13 @@ impl CompactHeader {
 }
 
 impl MummyItem for CompactHeader {
-    fn hydrate(addr: u64, mem: &dyn MemStore) -> Result<Self, ShaleError> {
+    fn hydrate<T: MemStore>(addr: u64, mem: &T) -> Result<Self, ShaleError> {
         let raw = mem
             .get_view(addr, Self::MSIZE)
             .ok_or(ShaleError::LinearMemStoreError)?;
-        let payload_size = u64::from_le_bytes(raw[..8].try_into().unwrap());
-        let is_freed = raw[8] != 0;
-        let desc_addr = u64::from_le_bytes(raw[9..17].try_into().unwrap());
+        let payload_size = u64::from_le_bytes(raw.as_deref()[..8].try_into().unwrap());
+        let is_freed = raw.as_deref()[8] != 0;
+        let desc_addr = u64::from_le_bytes(raw.as_deref()[9..17].try_into().unwrap());
         Ok(Self {
             payload_size,
             is_freed,
@@ -56,11 +56,11 @@ impl CompactFooter {
 }
 
 impl MummyItem for CompactFooter {
-    fn hydrate(addr: u64, mem: &dyn MemStore) -> Result<Self, ShaleError> {
+    fn hydrate<T: MemStore>(addr: u64, mem: &T) -> Result<Self, ShaleError> {
         let raw = mem
             .get_view(addr, Self::MSIZE)
             .ok_or(ShaleError::LinearMemStoreError)?;
-        let payload_size = u64::from_le_bytes(raw.deref().try_into().unwrap());
+        let payload_size = u64::from_le_bytes(raw.as_deref().try_into().unwrap());
         Ok(Self { payload_size })
     }
 
@@ -86,12 +86,12 @@ impl CompactDescriptor {
 }
 
 impl MummyItem for CompactDescriptor {
-    fn hydrate(addr: u64, mem: &dyn MemStore) -> Result<Self, ShaleError> {
+    fn hydrate<T: MemStore>(addr: u64, mem: &T) -> Result<Self, ShaleError> {
         let raw = mem
             .get_view(addr, Self::MSIZE)
             .ok_or(ShaleError::LinearMemStoreError)?;
-        let payload_size = u64::from_le_bytes(raw[..8].try_into().unwrap());
-        let haddr = u64::from_le_bytes(raw[8..].try_into().unwrap());
+        let payload_size = u64::from_le_bytes(raw.as_deref()[..8].try_into().unwrap());
+        let haddr = u64::from_le_bytes(raw.as_deref()[8..].try_into().unwrap());
         Ok(Self {
             payload_size,
             haddr,
@@ -155,14 +155,14 @@ impl CompactSpaceHeader {
 }
 
 impl MummyItem for CompactSpaceHeader {
-    fn hydrate(addr: u64, mem: &dyn MemStore) -> Result<Self, ShaleError> {
+    fn hydrate<T: MemStore + std::fmt::Debug>(addr: u64, mem: &T) -> Result<Self, ShaleError> {
         let raw = mem
             .get_view(addr, Self::MSIZE)
             .ok_or(ShaleError::LinearMemStoreError)?;
-        let meta_space_tail = u64::from_le_bytes(raw[..8].try_into().unwrap());
-        let compact_space_tail = u64::from_le_bytes(raw[8..16].try_into().unwrap());
-        let base_addr = u64::from_le_bytes(raw[16..24].try_into().unwrap());
-        let alloc_addr = u64::from_le_bytes(raw[24..].try_into().unwrap());
+        let meta_space_tail = u64::from_le_bytes(raw.as_deref()[..8].try_into().unwrap());
+        let compact_space_tail = u64::from_le_bytes(raw.as_deref()[8..16].try_into().unwrap());
+        let base_addr = u64::from_le_bytes(raw.as_deref()[16..24].try_into().unwrap());
+        let alloc_addr = u64::from_le_bytes(raw.as_deref()[24..].try_into().unwrap());
         Ok(Self {
             meta_space_tail,
             compact_space_tail,
@@ -193,12 +193,12 @@ impl<T> ObjPtrField<T> {
 }
 
 impl<T> MummyItem for ObjPtrField<T> {
-    fn hydrate(addr: u64, mem: &dyn MemStore) -> Result<Self, ShaleError> {
+    fn hydrate<U: MemStore>(addr: u64, mem: &U) -> Result<Self, ShaleError> {
         let raw = mem
             .get_view(addr, Self::MSIZE)
             .ok_or(ShaleError::LinearMemStoreError)?;
         Ok(Self(ObjPtr::new_from_addr(u64::from_le_bytes(
-            raw.deref().try_into().unwrap(),
+            raw.as_deref().try_into().unwrap(),
         ))))
     }
 
@@ -233,11 +233,11 @@ impl U64Field {
 }
 
 impl MummyItem for U64Field {
-    fn hydrate(addr: u64, mem: &dyn MemStore) -> Result<Self, ShaleError> {
+    fn hydrate<U: MemStore>(addr: u64, mem: &U) -> Result<Self, ShaleError> {
         let raw = mem
             .get_view(addr, Self::MSIZE)
             .ok_or(ShaleError::LinearMemStoreError)?;
-        Ok(Self(u64::from_le_bytes(raw.deref().try_into().unwrap())))
+        Ok(Self(u64::from_le_bytes(raw.as_deref().try_into().unwrap())))
     }
 
     fn dehydrated_len(&self) -> u64 {
@@ -262,16 +262,16 @@ impl std::ops::DerefMut for U64Field {
     }
 }
 
-struct CompactSpaceInner<T: MummyItem> {
-    meta_space: Rc<dyn MemStore>,
-    compact_space: Rc<dyn MemStore>,
+struct CompactSpaceInner<T: MummyItem, M: MemStore> {
+    meta_space: Rc<M>,
+    compact_space: Rc<M>,
     header: CompactSpaceHeaderSliced,
     obj_cache: super::ObjCache<T>,
     alloc_max_walk: u64,
     regn_nbit: u64,
 }
 
-impl<T: MummyItem> CompactSpaceInner<T> {
+impl<T: MummyItem, M: MemStore> CompactSpaceInner<T, M> {
     fn get_descriptor(
         &self,
         ptr: ObjPtr<CompactDescriptor>,
@@ -511,14 +511,14 @@ impl<T: MummyItem> CompactSpaceInner<T> {
     }
 }
 
-pub struct CompactSpace<T: MummyItem> {
-    inner: UnsafeCell<CompactSpaceInner<T>>,
+pub struct CompactSpace<T: MummyItem, M: MemStore> {
+    inner: UnsafeCell<CompactSpaceInner<T, M>>,
 }
 
-impl<T: MummyItem> CompactSpace<T> {
+impl<T: MummyItem, M: MemStore> CompactSpace<T, M> {
     pub fn new(
-        meta_space: Rc<dyn MemStore>,
-        compact_space: Rc<dyn MemStore>,
+        meta_space: Rc<M>,
+        compact_space: Rc<M>,
         header: Obj<CompactSpaceHeader>,
         obj_cache: super::ObjCache<T>,
         alloc_max_walk: u64,
@@ -538,7 +538,7 @@ impl<T: MummyItem> CompactSpace<T> {
     }
 }
 
-impl<T: MummyItem + 'static> ShaleStore<T> for CompactSpace<T> {
+impl<T: MummyItem + 'static, M: MemStore> ShaleStore<T> for CompactSpace<T, M> {
     fn put_item(&'_ self, item: T, extra: u64) -> Result<ObjRef<'_, T>, ShaleError> {
         let size = item.dehydrated_len() + extra;
         let inner = unsafe { &mut *self.inner.get() };

@@ -1,5 +1,5 @@
 use std::cell::UnsafeCell;
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 use std::rc::Rc;
 
 use shale::*;
@@ -9,6 +9,7 @@ pub type SpaceID = u8;
 /// Purely volatile, dynamically allocated vector-based implementation for [MemStore]. This is similar to
 /// [PlainMem]. The only difference is, when [write] dynamically allocate more space if original space is
 /// not enough.
+#[derive(Debug)]
 pub struct DynamicMem {
     space: Rc<UnsafeCell<Vec<u8>>>,
     id: SpaceID,
@@ -26,7 +27,11 @@ impl DynamicMem {
 }
 
 impl MemStore for DynamicMem {
-    fn get_view(&self, offset: u64, length: u64) -> Option<Box<dyn MemView>> {
+    fn get_view(
+        &self,
+        offset: u64,
+        length: u64,
+    ) -> Option<Box<dyn MemView<DerefReturn = Vec<u8>>>> {
         let offset = offset as usize;
         let length = length as usize;
         let size = offset + length;
@@ -44,14 +49,14 @@ impl MemStore for DynamicMem {
         }))
     }
 
-    fn get_shared(&self) -> Option<Box<dyn Deref<Target = dyn MemStore>>> {
+    fn get_shared(&self) -> Option<Box<dyn DerefMut<Target = dyn MemStore>>> {
         Some(Box::new(DynamicMemShared(Self {
             space: self.space.clone(),
             id: self.id,
         })))
     }
 
-    fn write(&self, offset: u64, change: &[u8]) {
+    fn write(&mut self, offset: u64, change: &[u8]) {
         let offset = offset as usize;
         let length = change.len();
         let size = offset + length;
@@ -89,4 +94,16 @@ impl Deref for DynamicMemShared {
     }
 }
 
-impl MemView for DynamicMemView {}
+impl DerefMut for DynamicMemShared {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl MemView for DynamicMemView {
+    type DerefReturn = Vec<u8>;
+
+    fn as_deref(&self) -> Self::DerefReturn {
+        self.mem.get_space_mut()[self.offset..self.offset + self.length].to_vec()
+    }
+}
