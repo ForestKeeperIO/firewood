@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::thread::JoinHandle;
 
 use bytemuck::{cast_slice, AnyBitPattern};
-use parking_lot::{Mutex, MutexGuard};
+use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use primitive_types::U256;
 use shale::{compact::CompactSpaceHeader, MemStore, MummyItem, MummyObj, ObjPtr, SpaceID};
 use typed_builder::TypedBuilder;
@@ -260,6 +260,11 @@ pub struct DBRev {
     blob: BlobStash,
 }
 
+pub struct RevStore {
+    store: VecDeque<Universe<StoreRevShared>>,
+    max_revisions: usize,
+}
+
 impl DBRev {
     fn flush_dirty(&mut self) -> Option<()> {
         self.header.flush_dirty();
@@ -400,8 +405,6 @@ struct DBInner {
     disk_thread: Option<JoinHandle<()>>,
     staging: Universe<Rc<StoreRevMut>>,
     cached: Universe<Rc<CachedSpace>>,
-    revisions: VecDeque<Universe<StoreRevShared>>,
-    max_revisions: usize,
 }
 
 impl Drop for DBInner {
@@ -413,7 +416,8 @@ impl Drop for DBInner {
 
 /// Firewood database handle.
 pub struct DB {
-    inner: Mutex<DBInner>,
+    inner: RwLock<DBInner>,
+    revisions: Rc<RwLock<RevStore>>,
     payload_regn_nbit: u64,
     rev_cfg: DBRevConfig,
 }
@@ -661,24 +665,27 @@ impl DB {
         latest.flush_dirty().unwrap();
 
         Ok(Self {
-            inner: Mutex::new(DBInner {
+            inner: RwLock::new(DBInner {
                 latest,
                 disk_thread,
                 disk_requester,
                 staging,
                 cached,
-                revisions: VecDeque::new(),
-                max_revisions: cfg.wal.max_revisions as usize,
             }),
             payload_regn_nbit: header.payload_regn_nbit,
             rev_cfg: cfg.rev.clone(),
+            revisions: Rc::new(RwLock::new(RevStore {
+                store: VecDeque::new(),
+                max_revisions: cfg.wal.max_revisions as usize,
+            })),
         })
     }
 
     /// Create a write batch.
     pub fn new_writebatch(&self) -> WriteBatch {
         WriteBatch {
-            m: self.inner.lock(),
+            m: self.inner.write(),
+            r: Rc::clone(&self.revisions),
             root_hash_recalc: true,
             committed: false,
         }
@@ -686,28 +693,28 @@ impl DB {
 
     /// Dump the MPT of the latest generic key-value storage.
     pub fn kv_dump(&self, w: &mut dyn Write) -> Result<(), DBError> {
-        self.inner.lock().latest.kv_dump(w)
+        self.inner.read().latest.kv_dump(w)
     }
 
     /// Dump the MPT of the latest entire account model storage.
     pub fn dump(&self, w: &mut dyn Write) -> Result<(), DBError> {
-        self.inner.lock().latest.dump(w)
+        self.inner.read().latest.dump(w)
     }
 
     /// Dump the MPT of the latest state storage under an account.
     pub fn dump_account<K: AsRef<[u8]>>(&self, key: K, w: &mut dyn Write) -> Result<(), DBError> {
-        self.inner.lock().latest.dump_account(key, w)
+        self.inner.read().latest.dump_account(key, w)
     }
 
     /// Get root hash of the latest generic key-value storage.
     pub fn kv_root_hash(&self) -> Result<Hash, DBError> {
-        self.inner.lock().latest.kv_root_hash()
+        self.inner.read().latest.kv_root_hash()
     }
 
     /// Get a value in the kv store associated with a particular key.
     pub fn kv_get<K: AsRef<[u8]>>(&self, key: K) -> Result<Vec<u8>, DBError> {
         self.inner
-            .lock()
+            .read()
             .latest
             .kv_get(key)
             .ok_or(DBError::KeyNotFound)
@@ -715,32 +722,32 @@ impl DB {
 
     /// Get root hash of the latest world state of all accounts.
     pub fn root_hash(&self) -> Result<Hash, DBError> {
-        self.inner.lock().latest.root_hash()
+        self.inner.read().latest.root_hash()
     }
 
     /// Get the latest balance of the account.
     pub fn get_balance<K: AsRef<[u8]>>(&self, key: K) -> Result<U256, DBError> {
-        self.inner.lock().latest.get_balance(key)
+        self.inner.read().latest.get_balance(key)
     }
 
     /// Get the latest code of the account.
     pub fn get_code<K: AsRef<[u8]>>(&self, key: K) -> Result<Vec<u8>, DBError> {
-        self.inner.lock().latest.get_code(key)
+        self.inner.read().latest.get_code(key)
     }
 
     /// Get the latest nonce of the account.
     pub fn get_nonce<K: AsRef<[u8]>>(&self, key: K) -> Result<u64, DBError> {
-        self.inner.lock().latest.get_nonce(key)
+        self.inner.read().latest.get_nonce(key)
     }
 
     /// Get the latest state value indexed by `sub_key` in the account indexed by `key`.
     pub fn get_state<K: AsRef<[u8]>>(&self, key: K, sub_key: K) -> Result<Vec<u8>, DBError> {
-        self.inner.lock().latest.get_state(key, sub_key)
+        self.inner.read().latest.get_state(key, sub_key)
     }
 
     /// Check if the account exists in the latest world state.
     pub fn exist<K: AsRef<[u8]>>(&self, key: K) -> Result<bool, DBError> {
-        self.inner.lock().latest.exist(key)
+        self.inner.read().latest.exist(key)
     }
 
     /// Get a handle that grants the access to some historical state of the entire DB.
@@ -752,10 +759,11 @@ impl DB {
     /// If nback equals 0, or is above the configured maximum number of revisions, this function returns None.
     /// It also returns None in the case where the nback is larger than the number of revisions available.
     pub fn get_revision(&self, nback: usize, cfg: Option<DBRevConfig>) -> Option<Revision> {
-        let mut inner = self.inner.lock();
+        let mut revs = self.revisions.write();
+        let inner = self.inner.read();
 
-        let rlen = inner.revisions.len();
-        if nback == 0 || nback > inner.max_revisions {
+        let rlen = revs.store.len();
+        if nback == 0 || nback > revs.max_revisions {
             return None;
         }
         if rlen < nback {
@@ -766,11 +774,11 @@ impl DB {
                     a.old.reverse()
                 }
 
-                let u = match inner.revisions.back() {
+                let u = match revs.store.back() {
                     Some(u) => u.to_mem_store_r(),
                     None => inner.cached.to_mem_store_r(),
                 };
-                inner.revisions.push_back(u.rewind(
+                revs.store.push_back(u.rewind(
                     &ash.0[&MERKLE_META_SPACE].old,
                     &ash.0[&MERKLE_PAYLOAD_SPACE].old,
                     &ash.0[&BLOB_META_SPACE].old,
@@ -778,7 +786,7 @@ impl DB {
                 ));
             }
         }
-        if inner.revisions.len() < nback {
+        if revs.store.len() < nback {
             return None;
         }
         // set up the storage layout
@@ -794,7 +802,7 @@ impl DB {
         // Blob CompactSpaceHeader starts right in blob meta space
         let blob_payload_header: ObjPtr<CompactSpaceHeader> = ObjPtr::new_from_addr(0);
 
-        let space = &inner.revisions[nback - 1];
+        let space = &revs.store[nback - 1];
 
         let (db_header_ref, merkle_payload_header_ref, blob_payload_header_ref) = {
             let merkle_meta_ref = &space.merkle.meta;
@@ -850,7 +858,7 @@ impl DB {
 
 /// Lock protected handle to a readable version of the DB.
 pub struct Revision<'a> {
-    _m: MutexGuard<'a, DBInner>,
+    _m: RwLockReadGuard<'a, DBInner>,
     rev: DBRev,
 }
 
@@ -865,7 +873,8 @@ impl<'a> std::ops::Deref for Revision<'a> {
 /// because when an error occurs, the write batch will be automaticlaly aborted so that the DB
 /// remains clean.
 pub struct WriteBatch<'a> {
-    m: MutexGuard<'a, DBInner>,
+    m: RwLockWriteGuard<'a, DBInner>,
+    r: Rc<RwLock<RevStore>>,
     root_hash_recalc: bool,
     committed: bool,
 }
@@ -1085,7 +1094,8 @@ impl<'a> WriteBatch<'a> {
             ),
         };
 
-        if let Some(rev) = inner.revisions.front_mut() {
+        let mut revs = self.r.write();
+        if let Some(rev) = revs.store.front_mut() {
             rev.merkle
                 .meta
                 .set_prev(new_base.merkle.meta.inner().clone());
@@ -1097,9 +1107,9 @@ impl<'a> WriteBatch<'a> {
                 .payload
                 .set_prev(new_base.blob.payload.inner().clone());
         }
-        inner.revisions.push_front(new_base);
-        while inner.revisions.len() > inner.max_revisions {
-            inner.revisions.pop_back();
+        revs.store.push_front(new_base);
+        while revs.store.len() > revs.max_revisions {
+            revs.store.pop_back();
         }
 
         self.committed = true;

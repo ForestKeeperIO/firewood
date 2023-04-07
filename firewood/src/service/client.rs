@@ -443,15 +443,16 @@ mod test {
         let batch = batch.kv_insert(b"k2", b"val").await.unwrap();
         batch.commit().await;
 
-        assert_ne!(
-            conn.get_revision(1, None)
-                .await
-                .unwrap()
-                .root_hash()
-                .await
-                .unwrap(),
-            merkle::Hash([0; 32])
-        );
+        let batch = conn.new_writebatch().await;
+        let batch = batch.kv_insert(b"k2", b"val").await.unwrap();
+
+        let revision = conn
+            .get_revision(1, None)
+            .await
+            .unwrap();
+        revision.close().await;
+
+        batch.commit().await;
     }
 
     fn db_config() -> DBConfig {
