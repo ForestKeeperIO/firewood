@@ -42,6 +42,7 @@ pub enum StoreError<T> {
 }
 
 pub trait MemStoreR: Debug {
+    /// Returns a slice of bytes from memory.
     fn get_slice(&self, offset: u64, length: u64) -> Option<Vec<u8>>;
     fn id(&self) -> SpaceID;
 }
@@ -363,6 +364,7 @@ impl MemStore for StoreRevShared {
     }
 }
 
+#[derive(Debug)]
 struct StoreRef {
     data: Vec<u8>,
 }

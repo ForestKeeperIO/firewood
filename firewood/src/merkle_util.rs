@@ -1,6 +1,7 @@
 use crate::merkle::*;
 use crate::proof::Proof;
-use crate::{dynamic_mem::DynamicMem, proof::ProofError};
+use crate::proof::ProofError;
+use shale::DynamicMem;
 use shale::{compact::CompactSpaceHeader, MemStore, MummyObj, ObjPtr};
 use std::rc::Rc;
 

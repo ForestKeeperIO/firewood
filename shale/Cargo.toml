@@ -10,3 +10,14 @@ license = "MIT"
 [dependencies]
 hex = "0.4.3"
 lru = "0.10.0"
+
+[dev-dependencies]
+nix = "0.26.1"
+growth-ring = { path = "../growth-ring" }
+memmap2 = "0.5.10"
+rand = "0.8.5"
+
+
+[[test]]
+name = "integration"
+path = "tests/mod.rs"

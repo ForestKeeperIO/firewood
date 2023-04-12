@@ -446,10 +446,7 @@ mod test {
         let batch = conn.new_writebatch().await;
         let batch = batch.kv_insert(b"k2", b"val").await.unwrap();
 
-        let revision = conn
-            .get_revision(1, None)
-            .await
-            .unwrap();
+        let revision = conn.get_revision(1, None).await.unwrap();
         revision.close().await;
 
         batch.commit().await;

@@ -25,6 +25,7 @@ pub const INVALID_SPACE_ID: SpaceID = 0xff;
 
 pub struct DiskWrite {
     pub space_id: SpaceID,
+    //
     pub space_off: u64,
     pub data: Box<[u8]>,
 }
@@ -42,7 +43,7 @@ impl std::fmt::Debug for DiskWrite {
 }
 
 /// A handle that pins and provides a readable access to a portion of the linear memory image.
-pub trait MemView {
+pub trait MemView: Debug {
     type DerefReturn: Deref<Target = [u8]>;
     fn as_deref(&self) -> Self::DerefReturn;
 }
@@ -69,7 +70,7 @@ pub trait MemStore: Debug {
 #[repr(C)]
 pub struct ObjPtr<T: ?Sized> {
     pub(crate) addr: u64,
-    phantom: PhantomData<T>,
+    _phantom: PhantomData<T>,
 }
 
 impl<T> std::cmp::PartialEq for ObjPtr<T> {
@@ -113,7 +114,7 @@ impl<T: ?Sized> ObjPtr<T> {
     pub(crate) fn new(addr: u64) -> Self {
         ObjPtr {
             addr,
-            phantom: PhantomData,
+            _phantom: PhantomData,
         }
     }
 
@@ -515,6 +516,7 @@ impl MemStore for PlainMem {
     }
 }
 
+#[derive(Debug)]
 struct PlainMemView {
     offset: usize,
     length: usize,
@@ -541,6 +543,111 @@ impl MemView for PlainMemView {
 
     fn as_deref(&self) -> Self::DerefReturn {
         self.mem.space.borrow()[self.offset..self.offset + self.length].to_vec()
+    }
+}
+
+/// Purely volatile, dynamically allocated vector-based implementation for [MemStore]. This is similar to
+/// [PlainMem]. The only difference is, when [write] dynamically allocate more space if original space is
+/// not enough.
+#[derive(Debug)]
+pub struct DynamicMem {
+    space: Rc<UnsafeCell<Vec<u8>>>,
+    id: SpaceID,
+}
+
+impl DynamicMem {
+    pub fn new(size: u64, id: SpaceID) -> Self {
+        let space = Rc::new(UnsafeCell::new(vec![0; size as usize]));
+        Self { space, id }
+    }
+
+    #[allow(clippy::mut_from_ref)]
+    // TODO: Refactor this usage.
+    fn get_space_mut(&self) -> &mut Vec<u8> {
+        unsafe { &mut *self.space.get() }
+    }
+}
+
+impl MemStore for DynamicMem {
+    fn get_view(
+        &self,
+        offset: u64,
+        length: u64,
+    ) -> Option<Box<dyn MemView<DerefReturn = Vec<u8>>>> {
+        let offset = offset as usize;
+        let length = length as usize;
+        let size = offset + length;
+        // Increase the size if the request range exceeds the current limit.
+        if size > self.get_space_mut().len() {
+            self.get_space_mut().resize(size, 0);
+        }
+        Some(Box::new(DynamicMemView {
+            offset,
+            length,
+            mem: Self {
+                space: self.space.clone(),
+                id: self.id,
+            },
+        }))
+    }
+
+    fn get_shared(&self) -> Option<Box<dyn DerefMut<Target = dyn MemStore>>> {
+        Some(Box::new(DynamicMemShared(Self {
+            space: self.space.clone(),
+            id: self.id,
+        })))
+    }
+
+    fn write(&mut self, offset: u64, change: &[u8]) {
+        let offset = offset as usize;
+        let length = change.len();
+        let size = offset + length;
+        // Increase the size if the request range exceeds the current limit.
+        if size > self.get_space_mut().len() {
+            self.get_space_mut().resize(size, 0);
+        }
+        self.get_space_mut()[offset..offset + length].copy_from_slice(change)
+    }
+
+    fn id(&self) -> SpaceID {
+        self.id
+    }
+}
+
+#[derive(Debug)]
+struct DynamicMemView {
+    offset: usize,
+    length: usize,
+    mem: DynamicMem,
+}
+
+struct DynamicMemShared(DynamicMem);
+
+impl Deref for DynamicMemView {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.mem.get_space_mut()[self.offset..self.offset + self.length]
+    }
+}
+
+impl Deref for DynamicMemShared {
+    type Target = dyn MemStore;
+    fn deref(&self) -> &(dyn MemStore + 'static) {
+        &self.0
+    }
+}
+
+impl DerefMut for DynamicMemShared {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl MemView for DynamicMemView {
+    type DerefReturn = Vec<u8>;
+
+    fn as_deref(&self) -> Self::DerefReturn {
+        self.mem.get_space_mut()[self.offset..self.offset + self.length].to_vec()
     }
 }
 
@@ -620,4 +727,36 @@ impl<T> ObjCache<T> {
         }
         Some(())
     }
+}
+
+#[test]
+#[should_panic(expected = "index 3 out of range")]
+fn test_plain_mem() {
+    let offset = 0;
+    let space_id = 0x0;
+    let capacity = 2;
+
+    let mut mem = PlainMem::new(capacity, space_id);
+    assert_eq!(mem.space.borrow().len() as u64, capacity);
+    mem.write(offset, b"a");
+    // panics out of range
+    mem.write(offset, b"abc");
+    assert_eq!(mem.space.borrow().get(0).unwrap(), &b'a');
+    assert_eq!(mem.id, space_id);
+
+    let view = mem.get_view(offset, 1).unwrap().as_deref();
+    assert_eq!(view, vec![b'a']);
+    let view = mem.get_view(offset, capacity + 1);
+    assert!(view.is_none());
+}
+
+#[test]
+fn test_dynamic_mem() {
+    let offset = 0;
+    let capacity = 1;
+    let space_id = 0x0;
+
+    let mut dm = DynamicMem::new(capacity, space_id);
+    dm.write(offset, b"a");
+    dm.write(offset, b"abc");
 }

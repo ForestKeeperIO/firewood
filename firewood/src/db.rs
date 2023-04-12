@@ -162,7 +162,7 @@ impl SubUniverse<Rc<dyn MemStoreR>> {
 impl SubUniverse<Rc<CachedSpace>> {
     fn to_mem_store_r(&self) -> SubUniverse<Rc<dyn MemStoreR>> {
         SubUniverse {
-            meta: self.meta.clone(),
+            meta: self.meta.clone(), // copy meta data to memory?
             payload: self.payload.clone(),
         }
     }
@@ -766,6 +766,8 @@ impl DB {
         if nback == 0 || nback > revs.max_revisions {
             return None;
         }
+
+        // Set underlying revision if the requested revision is less than the total available revisions.
         if rlen < nback {
             // TODO: Remove unwrap
             let ashes = inner.disk_requester.collect_ash(nback).ok().unwrap();
@@ -774,10 +776,14 @@ impl DB {
                     a.old.reverse()
                 }
 
+                // grab the first rev in store.
                 let u = match revs.store.back() {
+                    // if that exists convert to mem store
                     Some(u) => u.to_mem_store_r(),
+                    // else use a cache of latest? TODO what is to_mem_store_r(). I assume a read only store.
                     None => inner.cached.to_mem_store_r(),
                 };
+                // write
                 revs.store.push_back(u.rewind(
                     &ash.0[&MERKLE_META_SPACE].old,
                     &ash.0[&MERKLE_PAYLOAD_SPACE].old,
