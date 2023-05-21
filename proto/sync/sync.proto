@@ -1,0 +1,85 @@
+syntax = "proto3";
+
+package sync;
+
+option go_package = "github.com/ava-labs/avalanchego/proto/pb/sync";
+
+/* Request represents the two requests you can make */
+message Request {
+  oneof message {
+    RangeProofRequest range_proof_request = 1;
+    ChangeProofRequest change_proof_request = 2;
+  }
+}
+
+/* A RangeProofRequest requests a proof between two keys at a specific revision */
+message RangeProofRequest {
+  bytes root_hash = 1;
+  bytes start_key = 2;
+  bytes end_key = 3;
+  uint32 key_limit = 4;
+  uint32 bytes_limit = 5;
+}
+
+/* A ChangeProofRequest request a proof for all changes between two revisions */
+message ChangeProofRequest {
+  bytes start_root_hash = 1;
+  bytes end_root_hash = 2;
+  bytes start_key = 3;
+  bytes end_key = 4;
+  uint32 key_limit = 5;
+  uint32 bytes_limit = 6;
+}
+
+/* KeyValue represents a single key and its value */
+message KeyValue {
+  bytes key = 1;
+  bytes value = 2;
+}
+
+/* KeyChange is a change for a key from one version to another
+   used in ChangeProofResponse. If the value is nil, the key
+   is deleted in the final proof */
+message KeyChange {
+  bytes key = 1;
+  optional bytes value = 2;
+}
+
+/* SerializedPath is the serialized representation of a path */
+message SerializedPath {
+  uint32 nibble_length = 1;
+  bytes value = 2;
+}
+
+/* ProofNode is a node in a merkle proof */
+message ProofNode {
+  bytes key = 1;
+  optional bytes value_or_hash = 2;
+  map<uint32, bytes> children = 3;
+}
+
+/* RangeProofResponse is the response for a RangeProofRequest */
+message RangeProofResponse {
+  repeated ProofNode start = 1;
+  repeated ProofNode end = 2;
+  repeated KeyValue key_values = 3;
+}
+
+/* ChangeProof is a possible response to a ChangeProofRequests
+   which is in a shorter form: it only consists of a proof of the
+   lowest changed key, the high changed key, and the keys that
+   have changed between those. Some keys may be deleted (hence
+   the use of KeyChange instead of KeyValue) */
+message ChangeProof {
+  repeated ProofNode start_proof = 1;
+  repeated ProofNode end_proof = 2;
+  repeated KeyChange key_changes = 3;
+}
+
+/* ChangeProofResponse is the response for a ChangeProofRequest */
+message ChangeProofResponse {
+  oneof response {
+    ChangeProof change_proof = 1;
+    RangeProofResponse range_proof = 2;
+  }
+}
