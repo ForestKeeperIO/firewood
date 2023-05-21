@@ -4,6 +4,7 @@ members = [
   "firewood-libaio",
   "firewood-shale",
   "firewood",
+  "firewood-grpc",
   "fwdctl",
 ]
 
