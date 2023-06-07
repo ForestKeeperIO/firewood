@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use futures::executor::block_on;
 use shale::{CachedStore, CachedView, SpaceID};
 
 use nix::fcntl::{flock, FlockArg};
@@ -703,7 +704,7 @@ impl CachedSpaceInner {
         let file = self.files.get_file(poff >> file_nbit)?;
         let mut page: Page = [0; PAGE_SIZE as usize];
         nix::sys::uio::pread(
-            file.get_fd(),
+            file.fd(),
             &mut page,
             (poff & (file_size - 1)) as nix::libc::off_t,
         )
@@ -840,7 +841,7 @@ impl FilePool {
             rootdir: rootdir.to_path_buf(),
         };
         let f0 = s.get_file(0)?;
-        if flock(f0.get_fd(), FlockArg::LockExclusiveNonblock).is_err() {
+        if flock(f0.fd(), FlockArg::LockExclusiveNonblock).is_err() {
             return Err(StoreError::Init("the store is busy".into()));
         }
         Ok(s)
@@ -854,7 +855,7 @@ impl FilePool {
             None => {
                 files.put(
                     fid,
-                    Arc::new(File::new(fid, file_size, self.rootdir.clone())?),
+                    Arc::new(block_on(File::new(fid, file_size, &self.rootdir))?),
                 );
                 files.peek(&fid).unwrap().clone()
             }
@@ -869,7 +870,7 @@ impl FilePool {
 impl Drop for FilePool {
     fn drop(&mut self) {
         let f0 = self.get_file(0).unwrap();
-        flock(f0.get_fd(), FlockArg::UnlockNonblock).ok();
+        flock(f0.fd(), FlockArg::UnlockNonblock).ok();
     }
 }
 

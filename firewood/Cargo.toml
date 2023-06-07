@@ -23,7 +23,7 @@ enum-as-inner = "0.6.0"
 firewood-growth-ring = { version = "0.0.3", path = "../firewood-growth-ring" }
 firewood-libaio = {version = "0.0.3", path = "../firewood-libaio" }
 firewood-shale = { version = "0.0.3", path = "../firewood-shale" }
-futures = "0.3.24"
+futures = { version = "0.3.24", features = ["executor"] }
 hex = "0.4.3"
 lru = "0.10.0"
 metered = "0.9.0"

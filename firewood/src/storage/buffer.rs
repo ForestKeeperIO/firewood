@@ -144,12 +144,9 @@ impl DiskBuffer {
             .unwrap()
             .get_file(fid)
             .unwrap();
-        let fut = self.aiomgr.write(
-            file.get_fd(),
-            offset & fmask,
-            Box::new(*p.staging_data),
-            None,
-        );
+        let fut = self
+            .aiomgr
+            .write(file.fd(), offset & fmask, Box::new(*p.staging_data), None);
         let s = unsafe { self.get_longlive_self() };
         self.start_task(async move {
             let (res, _) = fut.await;
@@ -220,7 +217,7 @@ impl DiskBuffer {
                                             e, final_path
                                         ))
                                     })?
-                                    .get_fd(),
+                                    .fd(),
                                 &redo.data,
                                 (offset & file_mask) as nix::libc::off_t,
                             )

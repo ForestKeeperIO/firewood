@@ -3,6 +3,7 @@
 
 // Copied from CedrusDB
 
+use std::fs::OpenOptions;
 use std::os::fd::IntoRawFd;
 pub(crate) use std::os::unix::io::RawFd as Fd;
 use std::path::{Path, PathBuf};
@@ -15,47 +16,28 @@ pub struct File {
 }
 
 impl File {
-    pub fn open_file(rootpath: PathBuf, fname: &str, truncate: bool) -> Result<Fd, std::io::Error> {
-        let mut filepath = rootpath;
-        filepath.push(fname);
-        Ok(std::fs::File::options()
-            .truncate(truncate)
-            .read(true)
-            .write(true)
-            .mode(0o600)
-            .open(filepath)?
-            .into_raw_fd())
-    }
+    pub async fn new<P: AsRef<Path>>(
+        fid: u64,
+        _flen: u64,
+        rootdir: P,
+    ) -> Result<Self, std::io::Error> {
+        let filepath = rootdir.as_ref().with_file_name(format!("{fid:08x}.fw"));
 
-    pub fn create_file(rootpath: PathBuf, fname: &str) -> Result<Fd, std::io::Error> {
-        let mut filepath = rootpath;
-        filepath.push(fname);
-        Ok(std::fs::File::options()
-            .create(true)
-            .read(true)
-            .write(true)
-            .mode(0o600)
-            .open(filepath)?
-            .into_raw_fd())
-    }
+        let mut open_options = OpenOptions::new();
+        open_options.read(true).write(true).mode(0o600);
 
-    fn _get_fname(fid: u64) -> String {
-        format!("{fid:08x}.fw")
-    }
+        let fd = open_options
+            .open(&filepath)
+            .or_else(|e| match e.kind() {
+                ErrorKind::NotFound => open_options.create(true).open(&filepath),
+                _ => Err(e),
+            })
+            .map(|file| file.into_raw_fd())?;
 
-    pub fn new<P: AsRef<Path>>(fid: u64, _flen: u64, rootdir: P) -> Result<Self, std::io::Error> {
-        let fname = Self::_get_fname(fid);
-        let fd = match Self::open_file(rootdir.as_ref().to_path_buf(), &fname, false) {
-            Ok(fd) => fd,
-            Err(e) => match e.kind() {
-                ErrorKind::NotFound => Self::create_file(rootdir.as_ref().to_path_buf(), &fname)?,
-                _ => return Err(e),
-            },
-        };
         Ok(File { fd })
     }
 
-    pub fn get_fd(&self) -> Fd {
+    pub fn fd(&self) -> Fd {
         self.fd
     }
 }

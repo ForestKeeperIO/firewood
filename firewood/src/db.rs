@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use bytemuck::{cast_slice, AnyBitPattern};
+use futures::executor::block_on;
 use metered::{metered, HitCount};
 use parking_lot::{Mutex, RwLock};
 #[cfg(feature = "eth")]
@@ -503,8 +504,8 @@ impl Db {
         let blob_meta_path = file::touch_dir("meta", &blob_path)?;
         let blob_payload_path = file::touch_dir("compact", &blob_path)?;
 
-        let file0 = crate::file::File::new(0, SPACE_RESERVED, &merkle_meta_path)?;
-        let fd0 = file0.get_fd();
+        let file0 = block_on(crate::file::File::new(0, SPACE_RESERVED, &merkle_meta_path))?;
+        let fd0 = file0.fd();
 
         if reset {
             // initialize dbparams
