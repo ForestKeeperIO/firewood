@@ -21,8 +21,6 @@ use typed_builder::TypedBuilder;
 
 use crate::file::File;
 
-use self::buffer::DiskBufferRequester;
-
 pub(crate) const PAGE_SIZE_NBIT: u64 = 12;
 pub(crate) const PAGE_SIZE: u64 = 1 << PAGE_SIZE_NBIT;
 pub(crate) const PAGE_MASK: u64 = PAGE_SIZE - 1;
@@ -655,7 +653,6 @@ struct CachedSpaceInner {
     cached_pages: lru::LruCache<u64, Box<Page>>,
     pinned_pages: HashMap<u64, (usize, Box<Page>)>,
     files: Arc<FilePool>,
-    disk_buffer: DiskBufferRequester,
 }
 
 #[derive(Clone, Debug)]
@@ -675,7 +672,6 @@ impl CachedSpace {
                 ),
                 pinned_pages: HashMap::new(),
                 files,
-                disk_buffer: DiskBufferRequester::default(),
             })),
             space_id,
         })
@@ -698,12 +694,9 @@ impl CachedSpace {
 impl CachedSpaceInner {
     fn fetch_page(
         &mut self,
-        space_id: SpaceID,
+        _space_id: SpaceID,
         pid: u64,
     ) -> Result<Box<Page>, StoreError<io::Error>> {
-        if let Some(p) = self.disk_buffer.get_page(space_id, pid) {
-            return Ok(Box::new(*p));
-        }
         let file_nbit = self.files.get_file_nbit();
         let file_size = 1 << file_nbit;
         let poff = pid << PAGE_SIZE_NBIT;

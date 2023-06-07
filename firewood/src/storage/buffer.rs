@@ -128,6 +128,7 @@ impl DiskBuffer {
         })
     }
 
+    // TODO: fix this
     unsafe fn get_longlive_self(&mut self) -> &'static mut Self {
         std::mem::transmute::<&mut Self, &'static mut Self>(self)
     }
@@ -429,14 +430,6 @@ pub struct DiskBufferRequester {
     sender: mpsc::Sender<BufferCmd>,
 }
 
-impl Default for DiskBufferRequester {
-    fn default() -> Self {
-        Self {
-            sender: mpsc::channel(1).0,
-        }
-    }
-}
-
 impl DiskBufferRequester {
     /// Create a new requester.
     pub fn new(sender: mpsc::Sender<BufferCmd>) -> Self {
@@ -485,8 +478,7 @@ impl DiskBufferRequester {
 
     /// Register a cached space to the buffer.
     pub fn reg_cached_space(&self, space: &CachedSpace) {
-        let mut inner = space.inner.borrow_mut();
-        inner.disk_buffer = self.clone();
+        let inner = space.inner.borrow_mut();
         self.sender
             .blocking_send(BufferCmd::RegCachedSpace(space.id(), inner.files.clone()))
             .map_err(StoreError::Send)
