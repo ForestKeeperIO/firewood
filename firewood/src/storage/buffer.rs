@@ -165,12 +165,8 @@ impl DiskBuffer {
             // everything needs to be moved into this future in order to be properly dropped
             .run_until(async move {
                 loop {
-                    // can't hold the borrowed `pending` across the .await point inside the if-statement
-                    let pending_len = pending.borrow().len();
-
-                    if pending_len >= cfg.max_pending {
-                        notifier.notified().await;
-                    }
+                    // will resolve right away if pending.len() < max_pending
+                    notifier.notified().await;
 
                     let process_result = process(
                         pending.clone(),
@@ -246,7 +242,7 @@ fn schedule_write(
                         e.remove();
 
                         if pending_len < max.pending {
-                            fc_notifier.notify_waiters();
+                            fc_notifier.notify_one();
                         }
 
                         false
