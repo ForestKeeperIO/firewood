@@ -427,6 +427,9 @@ async fn run_wal_queue(
 
         task::spawn_local(task);
     }
+
+    // if this function breaks for any reason, make sure there is no one waiting for staged writes.
+    fc_notifier.notify_one();
 }
 
 fn panic_on_intialization_failure_with<'a, T>(
