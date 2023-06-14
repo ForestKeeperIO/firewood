@@ -144,7 +144,7 @@ impl DiskBuffer {
         let cfg = self.cfg;
         let wal_cfg = self.wal_cfg;
 
-        let pending = Rc::new(RefCell::new(HashMap::new()));
+        let pending_writes = Rc::new(RefCell::new(HashMap::new()));
         let file_pools = Rc::new(RefCell::new(std::array::from_fn(|_| None)));
         let local_pool = tokio::task::LocalSet::new();
 
@@ -165,15 +165,16 @@ impl DiskBuffer {
             // everything needs to be moved into this future in order to be properly dropped
             .run_until(async move {
                 loop {
-                    // can't hold the borrowed `pending` across the .await point inside the if-statement
-                    let pending_len = pending.borrow().len();
+                    // can't hold the borrowed `pending_writes` across the .await point inside the if-statement
+                    let pending_len = pending_writes.borrow().len();
 
                     if pending_len >= cfg.max_pending {
                         notifier.notified().await;
                     }
 
+                    // process the the request
                     let process_result = process(
-                        pending.clone(),
+                        pending_writes.clone(),
                         notifier.clone(),
                         file_pools.clone(),
                         aiomgr.clone(),
@@ -186,6 +187,7 @@ impl DiskBuffer {
                     )
                     .await;
 
+                    // stop handling new requests and exit the loop
                     if !process_result {
                         break;
                     }
@@ -193,9 +195,11 @@ impl DiskBuffer {
             })
             .await;
 
+        // when finished process all requests, wait for any pending-futures to complete
         local_pool.await;
     }
 }
+
 #[derive(Clone, Copy)]
 struct WalQueueMax {
     batch: usize,
