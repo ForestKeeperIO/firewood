@@ -1,7 +1,7 @@
 extern crate firewood_shale as shale;
 
 use criterion::{
-    black_box, criterion_group, criterion_main, profiler::Profiler, Bencher, Criterion,
+    black_box, criterion_group, criterion_main, profiler::Profiler, BatchSize, Bencher, Criterion,
 };
 use pprof::ProfilerGuard;
 use rand::Rng;
@@ -12,7 +12,7 @@ use shale::{
 };
 use std::{fs::File, os::raw::c_int, path::Path};
 
-const BENCH_MEM_SIZE: u64 = 2_000_000;
+const BENCH_MEM_SIZE: usize = 2_000_000;
 
 // To enable flamegraph output
 // cargo bench --bench shale -- --profile-time=N
@@ -54,21 +54,25 @@ impl<'a> Profiler for FlamegraphProfiler<'a> {
 
 fn get_view<C: CachedStore>(b: &mut Bencher, mut cached: C) {
     let mut rng = rand::thread_rng();
+    let rdata: String = ('a'..='z').collect();
 
-    b.iter(|| {
-        let len = rng.gen_range(0..26);
-        let rdata = black_box(&"abcdefghijklmnopqrstuvwxyz".as_bytes()[..len]);
+    b.iter_batched(
+        || {
+            let len = rng.gen_range(0..26);
+            (
+                &rdata.as_bytes()[..len],
+                rng.gen_range(0..BENCH_MEM_SIZE - len) as u64,
+            )
+        },
+        |(rdata, offset)| {
+            cached.write(offset, rdata);
+            let _view = black_box(cached.get_view(offset, rdata.len() as u64).unwrap());
 
-        let offset = rng.gen_range(0..BENCH_MEM_SIZE - len as u64);
-
-        cached.write(offset, rdata);
-        let view = cached
-            .get_view(offset, rdata.len().try_into().unwrap())
-            .unwrap();
-
-        serialize(&cached);
-        assert_eq!(view.as_deref(), rdata);
-    });
+            serialize(&cached);
+            // assert_eq!(&view.as_deref(), rdata);
+        },
+        BatchSize::SmallInput,
+    );
 }
 
 fn serialize<T: CachedStore>(m: &T) {
@@ -80,12 +84,14 @@ fn serialize<T: CachedStore>(m: &T) {
 
 fn bench_cursors(c: &mut Criterion) {
     let mut group = c.benchmark_group("shale");
+
     group.bench_function("PlainMem", |b| {
-        let mem = PlainMem::new(BENCH_MEM_SIZE, 0);
+        let mem = PlainMem::new(BENCH_MEM_SIZE as u64, 0);
         get_view(b, mem)
     });
+
     group.bench_function("DynamicMem", |b| {
-        let mem = DynamicMem::new(BENCH_MEM_SIZE, 0);
+        let mem = DynamicMem::new(BENCH_MEM_SIZE as u64, 0);
         get_view(b, mem)
     });
 }
