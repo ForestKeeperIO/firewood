@@ -19,5 +19,5 @@ sha3 = "0.10.7"
 rand = "0.8.5"
 
 [[bench]]
-name = "shale-bench"
+name = "shale"
 harness = false

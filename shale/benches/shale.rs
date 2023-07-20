@@ -15,7 +15,7 @@ use std::{fs::File, os::raw::c_int, path::Path};
 const BENCH_MEM_SIZE: u64 = 2_000_000;
 
 // To enable flamegraph output
-// cargo bench --bench shale-bench -- --profile-time=N
+// cargo bench --bench shale -- --profile-time=N
 pub struct FlamegraphProfiler<'a> {
     frequency: c_int,
     active_profiler: Option<ProfilerGuard<'a>>,
@@ -79,7 +79,7 @@ fn serialize<T: CachedStore>(m: &T) {
 }
 
 fn bench_cursors(c: &mut Criterion) {
-    let mut group = c.benchmark_group("shale-bench");
+    let mut group = c.benchmark_group("shale");
     group.bench_function("PlainMem", |b| {
         let mem = PlainMem::new(BENCH_MEM_SIZE, 0);
         get_view(b, mem)
