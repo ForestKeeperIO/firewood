@@ -131,7 +131,7 @@ pub trait DbView {
     async fn hash(&self) -> Result<HashKey, Error>;
 
     /// Get the value of a specific key
-    async fn val<K: KeyType>(&self, key: K) -> Result<Vec<u8>, Error>;
+    async fn val<'a, K: KeyType>(&'a self, key: K) -> Result<&'a [u8], Error>;
 
     /// Obtain a proof for a single key
     async fn single_key_proof<K: KeyType, V: ValueType>(&self, key: K) -> Result<Proof<V>, Error>;

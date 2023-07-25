@@ -56,7 +56,7 @@ impl DbView for HistoricalImpl {
         Ok(ROOT_HASH)
     }
 
-    async fn val<K: KeyType>(&self, _key: K) -> Result<Vec<u8>, Error> {
+    async fn val<K: KeyType>(&self, _key: K) -> Result<&[u8], Error> {
         Err(Error::KeyNotFound)
     }
 
