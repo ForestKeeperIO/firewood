@@ -128,7 +128,7 @@ pub trait Db {
 #[async_trait]
 pub trait DbView {
     /// Get the hash for the current DbView
-    async fn hash(&self) -> Result<HashKey, Error>;
+    async fn root_hash(&self) -> Result<HashKey, Error>;
 
     /// Get the value of a specific key
     async fn val<'a, K: KeyType>(&'a self, key: K) -> Result<&'a [u8], Error>;
