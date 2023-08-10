@@ -1,10 +1,11 @@
 // Copyright (C) 2023, Ava Labs, Inc. All rights reserved.
 // See the file LICENSE.md for licensing terms.
 
+use std::cell::OnceCell;
 use std::fmt;
 use std::io::{Cursor, Write};
 
-use crate::merkle::{Hash, Node, ValueTransformer};
+use crate::merkle::{Node, TrieHash, ValueTransformer};
 use primitive_types::U256;
 use shale::{CachedStore, ObjPtr, ObjRef, ShaleError, ShaleStore, Storable};
 
@@ -13,15 +14,16 @@ pub struct Account {
     pub balance: U256,
     pub root: ObjPtr<Node>,
     pub code: ObjPtr<Blob>,
-    pub root_hash: Hash,
-    pub code_hash: Hash,
+    pub root_hash: TrieHash,
+    pub code_hash: TrieHash,
 }
 
 impl Account {
-    pub fn empty_code() -> &'static Hash {
-        static V: OnceCell<Hash> = OnceCell::new();
+    pub fn empty_code() -> &'static TrieHash {
+        const V: OnceCell<TrieHash> = OnceCell::new();
+
         V.get_or_init(|| {
-            Hash(
+            TrieHash(
                 hex::decode("c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470")
                     .unwrap()
                     .try_into()
@@ -47,8 +49,8 @@ impl Account {
         let balance = U256::from_big_endian(&raw[8..40]);
         let root = u64::from_le_bytes(raw[40..48].try_into().unwrap());
         let code = u64::from_le_bytes(raw[48..56].try_into().unwrap());
-        let root_hash = Hash(raw[56..88].try_into().unwrap());
-        let code_hash = Hash(raw[88..].try_into().unwrap());
+        let root_hash = TrieHash(raw[56..88].try_into().unwrap());
+        let code_hash = TrieHash(raw[88..].try_into().unwrap());
 
         Self {
             nonce,
@@ -60,7 +62,7 @@ impl Account {
         }
     }
 
-    pub fn set_code(&mut self, code_hash: Hash, code: ObjPtr<Blob>) {
+    pub fn set_code(&mut self, code_hash: TrieHash, code: ObjPtr<Blob>) {
         self.code_hash = code_hash;
         self.code = code;
     }

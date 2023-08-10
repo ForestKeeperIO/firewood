@@ -755,11 +755,15 @@ impl Db<Store, SharedStore> {
         )?;
 
         #[cfg(feature = "eth")]
-        let blob_payload_header_ref = StoredView::ptr_to_obj(
-            &store.blob.meta,
-            blob_payload_header,
-            shale::compact::CompactHeader::MSIZE,
-        )?;
+        let blob_payload_header_ref = {
+            let blob_payload_header = ObjPtr::new_from_addr(0);
+
+            StoredView::ptr_to_obj(
+                &store.blob.meta,
+                blob_payload_header,
+                shale::compact::CompactHeader::MSIZE,
+            )?
+        };
 
         let merkle_space = shale::compact::CompactSpace::new(
             Arc::new(store.merkle.meta.clone()),
@@ -858,7 +862,7 @@ impl Db<Store, SharedStore> {
         let blob_space = shale::compact::CompactSpace::new(
             Arc::new(store.blob.meta.clone()),
             Arc::new(store.blob.payload.clone()),
-            blob_payload_header_ref,
+            _blob_payload_header_ref,
             shale::ObjCache::new(cfg.blob_ncached_objs),
             payload_max_walk,
             payload_regn_nbit,
@@ -1562,7 +1566,7 @@ impl<S: ShaleStore<Node> + Send + Sync, T> WriteBatch<S, T> {
 }
 
 #[cfg(feature = "eth")]
-impl<S: ShaleStore<Node> + Send + Sync> WriteBatch<S> {
+impl<S: ShaleStore<Node> + Send + Sync, T> WriteBatch<S, T> {
     fn change_account(
         &mut self,
         key: &[u8],
