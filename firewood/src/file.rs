@@ -10,6 +10,7 @@ use std::{io::ErrorKind, os::unix::prelude::OpenOptionsExt};
 
 use nix::unistd::close;
 
+#[derive(Debug)]
 pub struct File {
     fd: Fd,
 }

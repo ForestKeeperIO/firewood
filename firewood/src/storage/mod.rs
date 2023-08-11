@@ -7,7 +7,6 @@ use shale::{CachedStore, CachedView, SendSyncDerefMut, SpaceId};
 use std::{
     collections::HashMap,
     fmt::{self, Debug},
-    num::NonZeroUsize,
     ops::{Deref, DerefMut},
     path::PathBuf,
     sync::Arc,
@@ -15,6 +14,7 @@ use std::{
 use thiserror::Error;
 use tokio::sync::{mpsc::error::SendError, oneshot::error::RecvError};
 use typed_builder::TypedBuilder;
+use lru_cache::LruCache;
 
 pub mod buffer;
 
@@ -690,7 +690,7 @@ pub struct StoreConfig {
 
 #[derive(Debug)]
 struct CachedSpaceInner {
-    cached_pages: lru::LruCache<u64, Page>,
+    cached_pages: LruCache<u64, Page>,
     pinned_pages: HashMap<u64, (usize, Page)>,
     files: Arc<FilePool>,
     disk_requester: DiskBufferRequester,
@@ -711,9 +711,8 @@ impl CachedSpace {
         let files = Arc::new(FilePool::new(cfg)?);
         Ok(Self {
             inner: Arc::new(RwLock::new(CachedSpaceInner {
-                cached_pages: lru::LruCache::new(
-                    NonZeroUsize::new(cfg.ncached_pages).expect("non-zero cache size"),
-                ),
+                cached_pages: LruCache::new(
+                    cfg.ncached_pages),
                 pinned_pages: HashMap::new(),
                 files,
                 disk_requester,
@@ -754,7 +753,8 @@ impl CachedSpaceInner {
             None => {
                 let page = self
                     .cached_pages
-                    .pop(&pid)
+                    .get_mut(&pid)
+                    .cloned()
                     .or_else(|| self.disk_requester.get_page(space_id, pid));
                 let mut page = match page {
                     Some(page) => page,
@@ -801,7 +801,7 @@ impl CachedSpaceInner {
             }
             _ => unreachable!(),
         };
-        self.cached_pages.put(pid, page);
+        self.cached_pages.insert(pid, page);
     }
 }
 
@@ -871,7 +871,7 @@ impl MemStoreR for CachedSpace {
 
 #[derive(Debug)]
 pub struct FilePool {
-    files: parking_lot::Mutex<lru::LruCache<u64, Arc<File>>>,
+    files: parking_lot::Mutex<LruCache<u64, Arc<File>>>,
     file_nbit: u64,
     rootdir: PathBuf,
 }
@@ -881,8 +881,8 @@ impl FilePool {
         let rootdir = &cfg.rootdir;
         let file_nbit = cfg.file_nbit;
         let s = Self {
-            files: parking_lot::Mutex::new(lru::LruCache::new(
-                NonZeroUsize::new(cfg.ncached_files).expect("non-zero file num"),
+            files: parking_lot::Mutex::new(LruCache::new(
+                cfg.ncached_files,
             )),
             file_nbit,
             rootdir: rootdir.to_path_buf(),
@@ -897,12 +897,12 @@ impl FilePool {
     fn get_file(&self, fid: u64) -> Result<Arc<File>, StoreError<std::io::Error>> {
         let mut files = self.files.lock();
 
-        let file = match files.get(&fid) {
+        let file = match files.get_mut(&fid) {
             Some(f) => f.clone(),
             None => {
                 let file_size = 1 << self.file_nbit;
                 let file = Arc::new(File::new(fid, file_size, &self.rootdir)?);
-                files.put(fid, file.clone());
+                files.insert(fid, file.clone());
                 file
             }
         };
