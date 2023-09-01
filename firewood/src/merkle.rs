@@ -1280,7 +1280,7 @@ mod test {
 
     #[test]
     fn test_hydrate() {
-        let mut store = PlainMem::new(TRIE_HASH_LEN as u64, 0u8);
+        let mut store = PlainMem::new(TRIE_HASH_LEN, 0u8);
         store.write(0, ZERO_HASH.deref());
         assert_eq!(TrieHash::hydrate(0, &store).unwrap(), ZERO_HASH);
     }
@@ -1309,7 +1309,7 @@ mod test {
             let mut bytes = vec![0; node.dehydrated_len() as usize];
             node.dehydrate(&mut bytes).unwrap();
 
-            let mut mem = PlainMem::new(bytes.len() as u64, 0x0);
+            let mut mem = PlainMem::new(bytes.len(), 0x0);
             mem.write(0, &bytes);
             println!("{bytes:?}");
             let node_ = Node::hydrate(0, &mem).unwrap();

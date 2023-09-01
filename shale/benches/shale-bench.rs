@@ -78,7 +78,7 @@ fn serialize<T: CachedStore>(m: &T) {
 fn bench_cursors(c: &mut Criterion) {
     let mut group = c.benchmark_group("shale-bench");
     group.bench_function("PlainMem", |b| {
-        let mem = PlainMem::new(BENCH_MEM_SIZE as u64, 0);
+        let mem = PlainMem::new(BENCH_MEM_SIZE, 0);
         get_view(b, mem)
     });
     group.bench_function("DynamicMem", |b| {

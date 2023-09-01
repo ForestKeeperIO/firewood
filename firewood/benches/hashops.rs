@@ -57,7 +57,7 @@ impl Profiler for FlamegraphProfiler {
 
 fn bench_trie_hash(criterion: &mut Criterion) {
     let mut to = [1u8; TRIE_HASH_LEN];
-    let mut store = PlainMem::new(TRIE_HASH_LEN as u64, 0u8);
+    let mut store = PlainMem::new(TRIE_HASH_LEN, 0u8);
     store.write(0, ZERO_HASH.deref());
 
     criterion
@@ -84,15 +84,15 @@ fn bench_merkle<const N: usize>(criterion: &mut Criterion) {
                     let merkle_payload_header = DiskAddress::from(0);
 
                     let merkle_payload_header_ref = StoredView::ptr_to_obj(
-                        &PlainMem::new(2 * CompactHeader::MSIZE, 9),
+                        &PlainMem::new((2 * CompactHeader::MSIZE).try_into().unwrap(), 9),
                         merkle_payload_header,
                         CompactHeader::MSIZE,
                     )
                     .unwrap();
 
                     let store = CompactSpace::new(
-                        PlainMem::new(TEST_MEM_SIZE, 0).into(),
-                        PlainMem::new(TEST_MEM_SIZE, 1).into(),
+                        PlainMem::new(TEST_MEM_SIZE.try_into().unwrap(), 0).into(),
+                        PlainMem::new(TEST_MEM_SIZE.try_into().unwrap(), 1).into(),
                         merkle_payload_header_ref,
                         ObjCache::new(1 << 20),
                         4096,

@@ -11,14 +11,13 @@ use std::{
 /// your own [CachedStore] implementation.
 #[derive(Debug)]
 pub struct PlainMem {
-    space: Arc<RwLock<Vec<u8>>>,
+    space: Arc<RwLock<Box<[u8]>>>,
     id: SpaceId,
 }
 
 impl PlainMem {
-    pub fn new(size: u64, id: SpaceId) -> Self {
-        // TODO: this could cause problems on a 32-bit system
-        let space = Arc::new(RwLock::new(vec![0; size as usize]));
+    pub fn new(size: usize, id: SpaceId) -> Self {
+        let space = Arc::new(RwLock::new(vec![0; size].into_boxed_slice()));
         Self { space, id }
     }
 }
@@ -54,7 +53,7 @@ impl CachedStore for PlainMem {
     fn write(&mut self, offset: usize, change: &[u8]) {
         let length = change.len();
         let mut vect = self.space.write().unwrap();
-        vect.as_mut_slice()[offset..offset + length].copy_from_slice(change);
+        vect.deref_mut()[offset..offset + length].copy_from_slice(change);
     }
 
     fn id(&self) -> SpaceId {
