@@ -53,7 +53,7 @@ impl CachedStore for PlainMem {
 
     fn write(&mut self, offset: usize, change: &[u8]) {
         let length = change.len();
-        let mut vect = self.space.deref().write().unwrap();
+        let mut vect = self.space.write().unwrap();
         vect.as_mut_slice()[offset..offset + length].copy_from_slice(change);
     }
 
