@@ -490,6 +490,7 @@ impl StoreRevMut {
         pages.sort_by_key(|p| p.0);
         (StoreDelta(pages), guard.plain.clone())
     }
+
     pub fn reset_deltas(&self) {
         let mut guard = self.deltas.write();
         guard.plain = Ash::default();

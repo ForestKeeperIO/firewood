@@ -127,30 +127,23 @@ impl Proposal {
 
         // Check for if it can be committed
         let mut revisions = self.r.lock();
-        let committed_root_hash = revisions.base_revision.kv_root_hash().ok();
-        let committed_root_hash =
-            committed_root_hash.expect("committed_root_hash should not be none");
-        match &self.parent {
-            ProposalBase::Proposal(p) => {
-                let parent_root_hash = p.rev.kv_root_hash().ok();
-                let parent_root_hash =
-                    parent_root_hash.expect("parent_root_hash should not be none");
-                if parent_root_hash != committed_root_hash {
-                    return Err(DbError::InvalidProposal);
-                }
-            }
-            ProposalBase::View(p) => {
-                let parent_root_hash = p.kv_root_hash().ok();
-                let parent_root_hash =
-                    parent_root_hash.expect("parent_root_hash should not be none");
-                if parent_root_hash != committed_root_hash {
-                    return Err(DbError::InvalidProposal);
-                }
-            }
-        };
+        let committed_root_hash = revisions
+            .base_revision
+            .kv_root_hash()
+            .expect("committed_root_hash should not be none");
 
-        let kv_root_hash = self.rev.kv_root_hash().ok();
-        let kv_root_hash = kv_root_hash.expect("kv_root_hash should not be none");
+        let parent_root_hash = match &self.parent {
+            ProposalBase::Proposal(p) => p.rev.as_ref(),
+            ProposalBase::View(p) => p.as_ref(),
+        }
+        .kv_root_hash()
+        .expect("parent_root_hash should exist");
+
+        if parent_root_hash != committed_root_hash {
+            return Err(DbError::InvalidProposal);
+        }
+
+        let kv_root_hash = self.rev.kv_root_hash().expect("kv_root_hash should exist");
 
         // clear the staging layer and apply changes to the CachedSpace
         let (merkle_payload_redo, merkle_payload_wal) = self.store.merkle.payload.delta();
