@@ -1,0 +1,32 @@
+name: gh-pages
+
+on:
+  push:
+    branches: 
+      - "main"
+      - "rkuris/doc-it-hurts-when-i-do-this"
+  pull_request:
+    branches: 
+      - "main"
+      - "rkuris/doc-it-hurts-when-i-do-this"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+      - name: Build
+        run: cargo doc --no-deps
+      - name: Deploy
+        run: |
+          git clean -f docs
+          echo "<meta http-equiv=\"refresh\" content=\"0; url=firewood\">" > target/doc/index.html
+          echo "copying documentation to doc..."
+          cp -r target/doc ./docs
