@@ -5,10 +5,13 @@ use super::{Database, IntoStatusResultExt};
 use crate::sync::{
     db_server::Db as DbServerTrait, CommitChangeProofRequest, CommitRangeProofRequest,
     GetChangeProofRequest, GetChangeProofResponse, GetMerkleRootResponse, GetProofRequest,
-    GetProofResponse, GetRangeProofRequest, GetRangeProofResponse, VerifyChangeProofRequest,
-    VerifyChangeProofResponse,
+    GetProofResponse, GetRangeProofRequest, GetRangeProofResponse, MaybeBytes, Proof as SyncProof,
+    ProofNode, SerializedPath, VerifyChangeProofRequest, VerifyChangeProofResponse,
 };
-use firewood::v2::api::Db;
+use firewood::{
+    nibbles::Nibbles,
+    v2::api::{Db, DbView},
+};
 use tonic::{async_trait, Request, Response, Status};
 
 #[async_trait]
@@ -28,10 +31,60 @@ impl DbServerTrait for Database {
         &self,
         request: Request<GetProofRequest>,
     ) -> Result<Response<GetProofResponse>, Status> {
-        let GetProofRequest { key: _ } = request.into_inner();
-        let _revision = self.revision().await.into_status_result()?;
+        let GetProofRequest { key } = request.into_inner();
+        let revision = self.revision().await.into_status_result()?;
+        // TODO: verfiy that we should never return `is_nothing: false` for `MaybeBytes`
+        let value = revision
+            .val(&key)
+            .await
+            .into_status_result()?
+            .map(|v| v.to_vec())
+            .map(into_maybe_bytes);
+        let proof = revision
+            .single_key_proof::<_, Vec<u8>>(&key)
+            .await
+            .into_status_result()?
+            .map(|proof| {
+                let nibbles = Nibbles::<0>::new(&key);
+                let nibble_length = nibbles.len() as u64;
+                let value = nibbles.into_iter().collect();
 
-        todo!()
+                let serialized_path = SerializedPath {
+                    nibble_length,
+                    value,
+                };
+
+                let key = Some(serialized_path);
+                let value_or_hash = Some(value.clone()).map(into_maybe_bytes);
+
+                // TODO: key needs to go from u256 -> u32?
+                let mut i = 0;
+
+                let children = proof
+                    .0
+                    .into_iter()
+                    .map(|(_key, value)| {
+                        let key = i;
+                        i += 1;
+                        (key, value)
+                    })
+                    .collect();
+
+                let proof_node = ProofNode {
+                    key,
+                    value_or_hash,
+                    children,
+                };
+
+                // TODO: this is wrong too
+                vec![proof_node]
+            });
+
+        let proof = proof.map(|proof| SyncProof { key, value, proof });
+
+        let response = GetProofResponse { proof };
+
+        Ok(Response::new(response))
     }
 
     async fn get_change_proof(
@@ -100,5 +153,12 @@ impl DbServerTrait for Database {
         } = request.into_inner();
 
         todo!()
+    }
+}
+
+fn into_maybe_bytes(value: Vec<u8>) -> MaybeBytes {
+    MaybeBytes {
+        value,
+        is_nothing: false,
     }
 }
