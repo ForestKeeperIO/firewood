@@ -7,7 +7,7 @@ fn test_bincode() {
     let expected = vec![22];
     assert_eq!(encoded, expected);
 
-    let decoded: i64 = decode_int(&encoded[..]).unwrap();
+    let decoded: i64 = decode_int(&encoded[..]).unwrap().0;
     assert_eq!(val, decoded);
 
     let val = "hello world";
