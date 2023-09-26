@@ -20,7 +20,7 @@ requires authenticated state.
 Firewood is a robust database implemented from the ground up to directly store
 trie nodes and user data. Unlike most (if not all) of the solutions in the field,
 it is not built on top of a generic KV store such as LevelDB/RocksDB. Like a
-B+-tree based store, firewood directly uses the tree structure as the index on
+B+-tree based store, firewood directly uses the trie structure as the index on
 disk. Thus, there is no additional “emulation” of the logical trie to flatten
 out the data structure to feed into the underlying DB that is unaware of the
 data being stored. It provides generic trie storage for arbitrary keys and
@@ -42,7 +42,7 @@ firewood is licensed by the Ecosystem License. For more information, see the
 
 ![architecture diagram](./docs/assets/architecture.svg)<img src="./docs/assets/architecture.svg">
 
-## Termimology
+## Terminology
 
 * `Revision` - A historical point-in-time state/version of the trie. This
    represents the entire trie, including all `Key`/`Value`s at that point
@@ -50,7 +50,7 @@ firewood is licensed by the Ecosystem License. For more information, see the
 * `View` - This is the interface to read from a `Revision` or a `Proposal`.
 * `Node` - A node is a portion of a trie. A trie consists of nodes that are linked
   together. Nodes can point to other nodes and/or contain `Key`/`Value` pairs.
-* `Hash` - In this context, this refers to the merkle hash for a specific node.
+* `Hash` - In this context, this refers to the Merkle Trie hash for a specific node.
 * `Root Hash` - The hash of the root node for a specific revision.
 * `Key` - Represents an individual byte array used to index into a trie. A `Key`
   usually has a specific `Value`.
@@ -116,7 +116,7 @@ The focus of this milestone will be to support synchronization to other
 instances to replicate the state. A synchronization library should also
 be developed for this milestone.
 - [ ] :runner: Add support for Ava Labs generic test tool via grpc client
-- [ ] :runner: Pluggable encoding for nodes, for optional compatibilty with merkledb
+- [ ] :runner: Pluggable encoding for nodes, for optional compatibility with MerkleDB
 - [ ] Support replicating the full state with corresponding range proofs that
 verify the correctness of the data.
 - [ ] Support replicating the delta state from the last sync point with
