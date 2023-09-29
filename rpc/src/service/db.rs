@@ -33,13 +33,14 @@ impl DbServerTrait for Database {
     ) -> Result<Response<GetProofResponse>, Status> {
         let GetProofRequest { key } = request.into_inner();
         let revision = self.revision().await.into_status_result()?;
+        let root_hash = revision.root_hash().await.into_status_result()?;
         // TODO: verfiy that we should never return `is_nothing: false` for `MaybeBytes`
-        let value = revision
-            .val(&key)
-            .await
-            .into_status_result()?
-            .map(|v| v.to_vec())
-            .map(into_maybe_bytes);
+        let value = revision.val(&key).await.into_status_result()?;
+
+        let Some(value) = value else {
+            return Ok(Response::new(GetProofResponse { proof: None }));
+        };
+
         let proof = revision
             .single_key_proof::<_, Vec<u8>>(&key)
             .await
@@ -53,6 +54,7 @@ impl DbServerTrait for Database {
                     nibble_length,
                     value,
                 };
+                let value = serialized_path.value.clone();
 
                 let key = Some(serialized_path);
                 let value_or_hash = Some(value.clone()).map(into_maybe_bytes);

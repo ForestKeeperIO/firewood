@@ -204,7 +204,7 @@ impl<N: AsRef<[u8]> + Send> Proof<N> {
         }
     }
 
-    fn generate_subproof(&self, data: Vec<u8>) -> Result<SubProof, ProofError> {
+    fn generate_subproof(data: Vec<u8>) -> Result<SubProof, ProofError> {
         match data.len() {
             0..=31 => {
                 let sub_hash = sha3::Keccak256::digest(&data).into();
