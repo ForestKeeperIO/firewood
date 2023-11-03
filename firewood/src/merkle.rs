@@ -4,13 +4,7 @@
 use crate::shale::{self, disk_address::DiskAddress, ObjWriteError, ShaleError, ShaleStore};
 use crate::{nibbles::Nibbles, v2::api::Proof};
 use sha3::Digest;
-use std::{
-    cmp::Ordering,
-    collections::HashMap,
-    io::Write,
-    iter::once,
-    sync::{atomic::Ordering::Relaxed, OnceLock},
-};
+use std::{cmp::Ordering, collections::HashMap, io::Write, iter::once, sync::OnceLock};
 use thiserror::Error;
 
 mod node;
@@ -81,7 +75,7 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
     pub fn init_root(&self) -> Result<DiskAddress, MerkleError> {
         self.store
             .put_item(
-                Node::branch(BranchNode {
+                Node::from_branch(BranchNode {
                     path: vec![].into(),
                     children: [None; MAX_CHILDREN],
                     value: None,
@@ -119,9 +113,9 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
         Ok(if let Some(root) = root {
             let mut node = self.get_node(root)?;
             let res = node.get_root_hash::<S>(self.store.as_ref()).clone();
-            if node.lazy_dirty.load(Relaxed) {
+            if node.is_dirty() {
                 node.write(|_| {}).unwrap();
-                node.lazy_dirty.store(false, Relaxed);
+                node.set_dirty(false);
             }
             res
         } else {
@@ -196,7 +190,7 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                 node.rehash();
             })?;
 
-            let new_node = Node::leaf(PartialPath(new_node_path.to_vec()), Data(val));
+            let new_node = Node::from_leaf(PartialPath(new_node_path.to_vec()), Data(val));
             let leaf_address = self.put_node(new_node)?.as_ptr();
 
             let mut chd = [None; MAX_CHILDREN];
@@ -214,7 +208,7 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
 
             chd[n_path[idx] as usize] = Some(address);
 
-            let new_branch = Node::branch(BranchNode {
+            let new_branch = Node::from_branch(BranchNode {
                 path: PartialPath(matching_path[..idx].to_vec()),
                 children: chd,
                 value: None,
@@ -312,7 +306,7 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                     }
                     // insert path is greather than the path of the leaf
                     (Ordering::Greater, Some(n_value)) => {
-                        let leaf = Node::leaf(
+                        let leaf = Node::from_leaf(
                             PartialPath(insert_path[n_path.len() + 1..].to_vec()),
                             Data(val),
                         );
@@ -335,7 +329,7 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
 
             children[idx] = leaf_address.into();
 
-            self.put_node(Node::branch(BranchNode {
+            self.put_node(Node::from_branch(BranchNode {
                 path: PartialPath(prefix.to_vec()),
                 children,
                 value,
@@ -434,7 +428,7 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                             // insert the leaf to the empty slot
                             // create a new leaf
                             let leaf_ptr = self
-                                .put_node(Node::leaf(
+                                .put_node(Node::from_leaf(
                                     PartialPath(key_nibbles.collect()),
                                     Data(val),
                                 ))?
@@ -487,7 +481,7 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                                 // insert the leaf to the empty slot
                                 // create a new leaf
                                 let leaf_ptr = self
-                                    .put_node(Node::leaf(
+                                    .put_node(Node::from_leaf(
                                         PartialPath(key_nibbles.collect()),
                                         Data(val),
                                     ))?
@@ -609,7 +603,7 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                 chd[idx as usize] = Some(c_ptr);
 
                 let branch = self
-                    .put_node(Node::branch(BranchNode {
+                    .put_node(Node::from_branch(BranchNode {
                         path: vec![].into(),
                         children: chd,
                         value: Some(Data(val)),
@@ -654,7 +648,7 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                     // from: [p: Branch] -> [b (v)]x -> [Leaf]x
                     // to: [p: Branch] -> [Leaf (v)]
                     let leaf = self
-                        .put_node(Node::leaf(PartialPath(Vec::new()), val))?
+                        .put_node(Node::from_leaf(PartialPath(Vec::new()), val))?
                         .as_ptr();
                     p_ref
                         .write(|p| {
@@ -667,7 +661,10 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                     // from: P -> [p: Ext]x -> [b (v)]x -> [leaf]x
                     // to: P -> [Leaf (v)]
                     let leaf = self
-                        .put_node(Node::leaf(PartialPath(n.path.clone().into_inner()), val))?
+                        .put_node(Node::from_leaf(
+                            PartialPath(n.path.clone().into_inner()),
+                            val,
+                        ))?
                         .as_ptr();
                     deleted.push(p_ptr);
                     set_parent(leaf, parents);
@@ -1390,7 +1387,7 @@ mod tests {
             children_encoded[0] = Some(child);
         }
 
-        Node::branch(BranchNode {
+        Node::from_branch(BranchNode {
             path: vec![].into(),
             children,
             value,

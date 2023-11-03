@@ -77,53 +77,9 @@ impl<T: DeserializeOwned + AsRef<[u8]>> Encoded<T> {
     }
 }
 
-#[derive(Debug)]
-pub struct Node {
-    pub(super) root_hash: OnceLock<TrieHash>,
-    is_encoded_longer_than_hash_len: OnceLock<bool>,
-    encoded: OnceLock<Vec<u8>>,
-    // lazy_dirty is an atomicbool, but only writers ever set it
-    // Therefore, we can always use Relaxed ordering. It's atomic
-    // just to ensure Sync + Send.
-    pub(super) lazy_dirty: AtomicBool,
-    pub(super) inner: NodeType,
-}
-
-impl Eq for Node {}
-
-impl PartialEq for Node {
-    fn eq(&self, other: &Self) -> bool {
-        let Node {
-            root_hash,
-            is_encoded_longer_than_hash_len,
-            encoded,
-            lazy_dirty,
-            inner,
-        } = self;
-        *root_hash == other.root_hash
-            && *is_encoded_longer_than_hash_len == other.is_encoded_longer_than_hash_len
-            && *encoded == other.encoded
-            && (*lazy_dirty).load(Ordering::Relaxed) == other.lazy_dirty.load(Ordering::Relaxed)
-            && *inner == other.inner
-    }
-}
-
-impl Clone for Node {
-    fn clone(&self) -> Self {
-        Self {
-            root_hash: self.root_hash.clone(),
-            is_encoded_longer_than_hash_len: self.is_encoded_longer_than_hash_len.clone(),
-            encoded: self.encoded.clone(),
-            lazy_dirty: AtomicBool::new(self.lazy_dirty.load(Ordering::Relaxed)),
-            inner: self.inner.clone(),
-        }
-    }
-}
-
 #[derive(PartialEq, Eq, Clone, Debug, EnumAsInner)]
-#[allow(clippy::large_enum_variant)]
 pub enum NodeType {
-    Branch(BranchNode),
+    Branch(Box<BranchNode>),
     Leaf(LeafNode),
     Extension(ExtNode),
 }
@@ -155,7 +111,7 @@ impl NodeType {
                 }
             }
             // TODO: add path
-            BRANCH_NODE_SIZE => Ok(NodeType::Branch(BranchNode::decode(buf)?)),
+            BRANCH_NODE_SIZE => Ok(NodeType::Branch(BranchNode::decode(buf)?.into())),
             size => Err(Box::new(bincode::ErrorKind::Custom(format!(
                 "invalid size: {size}"
             )))),
@@ -179,6 +135,51 @@ impl NodeType {
     }
 }
 
+#[derive(Debug)]
+pub struct Node {
+    pub(super) root_hash: OnceLock<TrieHash>,
+    is_encoded_longer_than_hash_len: OnceLock<bool>,
+    encoded: OnceLock<Vec<u8>>,
+    // lazy_dirty is an atomicbool, but only writers ever set it
+    // Therefore, we can always use Relaxed ordering. It's atomic
+    // just to ensure Sync + Send.
+    lazy_dirty: AtomicBool,
+    pub(super) inner: NodeType,
+}
+
+impl Eq for Node {}
+
+impl PartialEq for Node {
+    fn eq(&self, other: &Self) -> bool {
+        let is_dirty = self.is_dirty();
+
+        let Node {
+            root_hash,
+            is_encoded_longer_than_hash_len,
+            encoded,
+            lazy_dirty: _,
+            inner,
+        } = self;
+        *root_hash == other.root_hash
+            && *is_encoded_longer_than_hash_len == other.is_encoded_longer_than_hash_len
+            && *encoded == other.encoded
+            && is_dirty == other.is_dirty()
+            && *inner == other.inner
+    }
+}
+
+impl Clone for Node {
+    fn clone(&self) -> Self {
+        Self {
+            root_hash: self.root_hash.clone(),
+            is_encoded_longer_than_hash_len: self.is_encoded_longer_than_hash_len.clone(),
+            encoded: self.encoded.clone(),
+            lazy_dirty: AtomicBool::new(self.is_dirty()),
+            inner: self.inner.clone(),
+        }
+    }
+}
+
 impl From<NodeType> for Node {
     fn from(inner: NodeType) -> Self {
         let mut s = Self {
@@ -198,6 +199,11 @@ impl Node {
     const EXT_NODE: u8 = 0x1;
     const LEAF_NODE: u8 = 0x2;
 
+    const ROOT_HASH_VALID_BIT: u8 = 1 << 0;
+    // TODO: why are these different?
+    const IS_ENCODED_BIG_VALID: u8 = 1 << 1;
+    const LONG_BIT: u8 = 1 << 2;
+
     pub(super) fn max_branch_node_size() -> u64 {
         let max_size: OnceLock<u64> = OnceLock::new();
         *max_size.get_or_init(|| {
@@ -205,12 +211,15 @@ impl Node {
                 root_hash: OnceLock::new(),
                 is_encoded_longer_than_hash_len: OnceLock::new(),
                 encoded: OnceLock::new(),
-                inner: NodeType::Branch(BranchNode {
-                    path: vec![].into(),
-                    children: [Some(DiskAddress::null()); MAX_CHILDREN],
-                    value: Some(Data(Vec::new())),
-                    children_encoded: Default::default(),
-                }),
+                inner: NodeType::Branch(
+                    BranchNode {
+                        path: vec![].into(),
+                        children: [Some(DiskAddress::null()); MAX_CHILDREN],
+                        value: Some(Data(Vec::new())),
+                        children_encoded: Default::default(),
+                    }
+                    .into(),
+                ),
                 lazy_dirty: AtomicBool::new(false),
             }
             .serialized_len()
@@ -223,14 +232,14 @@ impl Node {
 
     pub(super) fn get_root_hash<S: ShaleStore<Node>>(&self, store: &S) -> &TrieHash {
         self.root_hash.get_or_init(|| {
-            self.lazy_dirty.store(true, Ordering::Relaxed);
+            self.set_dirty(true);
             TrieHash(Keccak256::digest(self.get_encoded::<S>(store)).into())
         })
     }
 
     fn is_encoded_longer_than_hash_len<S: ShaleStore<Node>>(&self, store: &S) -> bool {
         *self.is_encoded_longer_than_hash_len.get_or_init(|| {
-            self.lazy_dirty.store(true, Ordering::Relaxed);
+            self.set_dirty(true);
             self.get_encoded(store).len() >= TRIE_HASH_LEN
         })
     }
@@ -241,11 +250,11 @@ impl Node {
         self.root_hash = OnceLock::new();
     }
 
-    pub fn branch(node: BranchNode) -> Self {
-        Self::from(NodeType::Branch(node))
+    pub fn from_branch(node: BranchNode) -> Self {
+        Self::from(NodeType::Branch(node.into()))
     }
 
-    pub fn leaf(path: PartialPath, data: Data) -> Self {
+    pub fn from_leaf(path: PartialPath, data: Data) -> Self {
         Self::from(NodeType::Leaf(LeafNode { path, data }))
     }
 
@@ -277,10 +286,13 @@ impl Node {
         }
     }
 
-    const ROOT_HASH_VALID_BIT: u8 = 1 << 0;
-    // TODO: why are these different?
-    const IS_ENCODED_BIG_VALID: u8 = 1 << 1;
-    const LONG_BIT: u8 = 1 << 2;
+    pub(super) fn is_dirty(&self) -> bool {
+        self.lazy_dirty.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn set_dirty(&self, is_dirty: bool) {
+        self.lazy_dirty.store(is_dirty, Ordering::Relaxed)
+    }
 }
 
 impl Storable for Node {
@@ -382,12 +394,15 @@ impl Storable for Node {
                 Ok(Self::new_from_hash(
                     root_hash,
                     is_encoded_longer_than_hash_len,
-                    NodeType::Branch(BranchNode {
-                        path: vec![].into(),
-                        children: chd,
-                        value,
-                        children_encoded: chd_encoded,
-                    }),
+                    NodeType::Branch(
+                        BranchNode {
+                            path: vec![].into(),
+                            children: chd,
+                            value,
+                            children_encoded: chd_encoded,
+                        }
+                        .into(),
+                    ),
                 ))
             }
 
@@ -636,7 +651,7 @@ pub(super) mod tests {
     use test_case::test_case;
 
     pub fn leaf(path: Vec<u8>, data: Vec<u8>) -> Node {
-        Node::leaf(PartialPath(path), Data(data))
+        Node::from_leaf(PartialPath(path), Data(data))
     }
 
     pub fn branch(
@@ -664,7 +679,7 @@ pub(super) mod tests {
             })
             .unwrap_or_default();
 
-        Node::branch(BranchNode {
+        Node::from_branch(BranchNode {
             path: vec![].into(),
             children,
             value: value.map(Data),
