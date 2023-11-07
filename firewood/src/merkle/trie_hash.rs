@@ -4,7 +4,7 @@
 use crate::shale::{CachedStore, ShaleError, Storable};
 use std::{
     fmt::{self, Debug},
-    io::Write,
+    io::{Cursor, Write},
 };
 
 pub const TRIE_HASH_LEN: usize = 32;
@@ -36,7 +36,10 @@ impl Storable for TrieHash {
         U64_TRIE_HASH_LEN
     }
 
-    fn serialize<W: Write>(&self, mut to: W) -> Result<(), ShaleError> {
+    fn serialize<W>(&self, mut to: Cursor<W>) -> Result<(), ShaleError>
+    where
+        Cursor<W>: Write,
+    {
         to.write_all(&self.0).map_err(ShaleError::Io)
     }
 }
@@ -56,7 +59,7 @@ mod tests {
         let zero_hash = TrieHash([0u8; TRIE_HASH_LEN]);
 
         let mut to = [1u8; TRIE_HASH_LEN];
-        zero_hash.serialize(&mut to[..]).unwrap();
+        zero_hash.serialize(Cursor::new(&mut to[..])).unwrap();
 
         assert_eq!(&to, &zero_hash.0);
     }

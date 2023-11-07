@@ -18,7 +18,9 @@ use firewood::{
 };
 use pprof::ProfilerGuard;
 use rand::{distributions::Alphanumeric, rngs::StdRng, Rng, SeedableRng};
-use std::{fs::File, iter::repeat_with, ops::Deref, os::raw::c_int, path::Path, sync::Arc};
+use std::{
+    fs::File, io::Cursor, iter::repeat_with, ops::Deref, os::raw::c_int, path::Path, sync::Arc,
+};
 
 const ZERO_HASH: TrieHash = TrieHash([0u8; TRIE_HASH_LEN]);
 
@@ -67,7 +69,7 @@ fn bench_trie_hash(criterion: &mut Criterion) {
     criterion
         .benchmark_group("TrieHash")
         .bench_function("dehydrate", |b| {
-            b.iter(|| ZERO_HASH.serialize(&mut to[..]).unwrap());
+            b.iter(|| ZERO_HASH.serialize(Cursor::new(&mut to[..])).unwrap());
         })
         .bench_function("hydrate", |b| {
             b.iter(|| TrieHash::deserialize(0, &store).unwrap());

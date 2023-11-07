@@ -770,7 +770,10 @@ impl Storable for Node {
             }
     }
 
-    fn serialize<W: Write>(&self, mut to: W) -> Result<(), ShaleError> {
+    fn serialize<W>(&self, mut to: Cursor<W>) -> Result<(), ShaleError>
+    where
+        Cursor<W>: Write,
+    {
         let mut attrs = 0;
         attrs |= match self.root_hash.get() {
             Some(h) => {
@@ -907,7 +910,7 @@ pub(super) mod tests {
     fn test_encoding(node: Node) {
         let mut bytes = Vec::with_capacity(node.serialized_len() as usize);
 
-        node.serialize(&mut bytes).unwrap();
+        node.serialize(Cursor::new(&mut bytes)).unwrap();
 
         let mut mem = PlainMem::new(node.serialized_len(), 0x00);
         mem.write(0, &bytes);

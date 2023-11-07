@@ -6,7 +6,7 @@ use crate::shale::ObjCache;
 use super::disk_address::DiskAddress;
 use super::{CachedStore, Obj, ObjRef, ShaleError, ShaleStore, Storable, StoredView};
 use std::fmt::Debug;
-use std::io::Write;
+use std::io::{Cursor, Write};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, RwLock};
 
@@ -52,7 +52,10 @@ impl Storable for CompactHeader {
         Self::MSIZE
     }
 
-    fn serialize<W: Write>(&self, mut to: W) -> Result<(), ShaleError> {
+    fn serialize<W>(&self, mut to: Cursor<W>) -> Result<(), ShaleError>
+    where
+        Cursor<W>: Write,
+    {
         to.write_all(&self.payload_size.to_le_bytes())?;
         to.write_all(&[if self.is_freed { 1 } else { 0 }])?;
         to.write_all(&self.desc_addr.to_le_bytes())?;
@@ -86,7 +89,10 @@ impl Storable for CompactFooter {
         Self::MSIZE
     }
 
-    fn serialize<W: Write>(&self, mut to: W) -> Result<(), ShaleError> {
+    fn serialize<W>(&self, mut to: Cursor<W>) -> Result<(), ShaleError>
+    where
+        Cursor<W>: Write,
+    {
         to.write_all(&self.payload_size.to_le_bytes())?;
         Ok(())
     }
@@ -123,7 +129,10 @@ impl Storable for CompactDescriptor {
         Self::MSIZE
     }
 
-    fn serialize<W: Write>(&self, mut to: W) -> Result<(), ShaleError> {
+    fn serialize<W>(&self, mut to: Cursor<W>) -> Result<(), ShaleError>
+    where
+        Cursor<W>: Write,
+    {
         to.write_all(&self.payload_size.to_le_bytes())?;
         to.write_all(&self.haddr.to_le_bytes())?;
         Ok(())
@@ -202,7 +211,10 @@ impl Storable for CompactSpaceHeader {
         Self::MSIZE
     }
 
-    fn serialize<W: Write>(&self, mut to: W) -> Result<(), ShaleError> {
+    fn serialize<W>(&self, mut to: Cursor<W>) -> Result<(), ShaleError>
+    where
+        Cursor<W>: Write,
+    {
         to.write_all(&self.meta_space_tail.to_le_bytes())?;
         to.write_all(&self.compact_space_tail.to_le_bytes())?;
         to.write_all(&self.base_addr.to_le_bytes())?;
@@ -628,7 +640,10 @@ mod tests {
             Self::MSIZE
         }
 
-        fn serialize<W: Write>(&self, mut to: W) -> Result<(), ShaleError> {
+        fn serialize<W>(&self, mut to: Cursor<W>) -> Result<(), ShaleError>
+        where
+            Cursor<W>: Write,
+        {
             to.write_all(&self.0)?;
             Ok(())
         }
