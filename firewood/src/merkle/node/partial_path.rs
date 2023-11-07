@@ -82,7 +82,7 @@ impl PartialPath {
     pub fn from_nibbles<const N: usize>(mut nibbles: NibblesIterator<'_, N>) -> (Self, bool) {
         let flags = Flags::from_bits_retain(nibbles.next().unwrap_or_default());
 
-        if flags.contains(Flags::ODD_LEN) {
+        if !flags.contains(Flags::ODD_LEN) {
             let _ = nibbles.next();
         }
 

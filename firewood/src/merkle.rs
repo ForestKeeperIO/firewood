@@ -1369,7 +1369,10 @@ mod tests {
         let mem_meta = Arc::new(dm);
         let mem_payload = Arc::new(DynamicMem::new(0x10000, 0x1));
 
-        let cache = shale::ObjCache::new(1);
+        // TODO: add path
+        // TODO: don't actually add path, but this should be reset to 1 when all the other "add path"
+        // TODOs are done.
+        let cache = shale::ObjCache::new(100);
         let space =
             shale::compact::CompactSpace::new(mem_meta, mem_payload, compact_header, cache, 10, 16)
                 .expect("CompactSpace init fail");

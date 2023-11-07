@@ -390,12 +390,13 @@ impl Storable for Node {
 
                 cur.read_exact(&mut buff[..4])?;
 
-                let raw_len =
-                    u32::from_le_bytes(buff[..4].try_into().expect("invalid slice")) as u64;
+                let raw_len = u32::from_le_bytes(buff[..4].try_into().expect("invalid slice"));
 
-                let value = if raw_len == u32::MAX as u64 {
+                let value = if raw_len == u32::MAX {
                     None
                 } else {
+                    let raw_len = raw_len as u64;
+
                     Some(Data(
                         mem.get_view(addr + Meta::SIZE + branch_header_size as usize, raw_len)
                             .ok_or(ShaleError::InvalidCacheView {
@@ -597,13 +598,13 @@ impl Storable for Node {
                 NodeType::Branch(n) => {
                     // TODO: add path
                     let mut encoded_len = 0;
-                    for emcoded in n.children_encoded.iter() {
-                        encoded_len += match emcoded {
+                    for encoded in n.children_encoded.iter() {
+                        encoded_len += match encoded {
                             Some(v) => 1 + v.len() as u64,
                             None => 1,
                         }
                     }
-                    MAX_CHILDREN as u64 * 8
+                    MAX_CHILDREN as u64 * DiskAddress::MSIZE
                         + 4
                         + match &n.value {
                             Some(val) => val.len() as u64,
