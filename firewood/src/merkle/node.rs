@@ -409,7 +409,7 @@ impl Storable for Node {
 
                 let mut chd_encoded: [Option<Vec<u8>>; MAX_CHILDREN] = Default::default();
 
-                let offset = if raw_len == u32::MAX as u64 {
+                let offset = if raw_len == u32::MAX {
                     addr + Meta::SIZE + branch_header_size as usize
                 } else {
                     addr + Meta::SIZE + branch_header_size as usize + raw_len as usize
