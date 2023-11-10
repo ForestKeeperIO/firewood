@@ -5,7 +5,6 @@ use std::{
     fmt::{Debug, Error as FmtError, Formatter},
     io::{Cursor, Read, Write},
     mem::size_of,
-    path::Path,
 };
 
 use bincode::Options;
@@ -111,15 +110,15 @@ impl Storable for LeafNode {
         offset += header_size as usize;
 
         let mut cursor = Cursor::new(node_header_raw);
-        let mut buf = [0u8; Self::DATA_LEN_SIZE as usize];
 
         let path_len = {
-            let buf = &mut buf[..Self::PATH_LEN_SIZE as usize];
-            cursor.read_exact(buf)?;
-            buf[0] as u64
+            let mut buf = [0u8; Self::PATH_LEN_SIZE as usize];
+            cursor.read_exact(buf.as_mut())?;
+            PathLen::from_le_bytes(buf) as u64
         };
 
         let data_len = {
+            let mut buf = [0u8; Self::DATA_LEN_SIZE as usize];
             cursor.read_exact(buf.as_mut())?;
             DataLen::from_le_bytes(buf) as u64
         };
