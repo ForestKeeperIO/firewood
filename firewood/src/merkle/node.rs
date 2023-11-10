@@ -524,8 +524,8 @@ pub(super) mod tests {
 
     struct Nil;
 
-    impl Into<Option<&'static [u8; 0]>> for Nil {
-        fn into(self) -> Option<&'static [u8; 0]> {
+    impl From<Nil> for Option<&'static [u8; 0]> {
+        fn from(_val: Nil) -> Self {
             None
         }
     }

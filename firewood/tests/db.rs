@@ -114,6 +114,7 @@ async fn test_revisions() {
             .await;
         let mut dumped = VecDeque::new();
         let mut hashes: VecDeque<api::HashKey> = VecDeque::new();
+
         for _ in 0..10 {
             {
                 let mut batch = Vec::new();
