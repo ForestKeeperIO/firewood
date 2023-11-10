@@ -3,7 +3,8 @@
 
 use super::{Data, Encoded, Node};
 use crate::{
-    merkle::{PartialPath, TRIE_HASH_LEN},
+    merkle::{from_nibbles, to_nibble_array, PartialPath, TRIE_HASH_LEN},
+    nibbles::Nibbles,
     shale::{DiskAddress, Storable},
     shale::{ShaleError, ShaleStore},
 };
@@ -15,6 +16,7 @@ use std::{
     ops::Deref,
 };
 
+type PathLen = u8;
 pub type DataLen = u32;
 pub type EncodedChildLen = u8;
 
@@ -54,7 +56,7 @@ impl From<BranchDataLength> for u32 {
 impl Debug for BranchNode {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), FmtError> {
         write!(f, "[Branch")?;
-        write!(f, " path={:?}", self.path)?;
+        write!(f, r#" path="{:?}""#, self.path)?;
 
         for (i, c) in self.children.iter().enumerate() {
             if let Some(c) = c {
@@ -81,7 +83,7 @@ impl Debug for BranchNode {
 
 impl BranchNode {
     pub const MAX_CHILDREN: usize = MAX_CHILDREN;
-    pub const MSIZE: usize = Self::MAX_CHILDREN + 1;
+    pub const MSIZE: usize = Self::MAX_CHILDREN + 2;
 
     pub fn new(
         path: PartialPath,
@@ -136,6 +138,10 @@ impl BranchNode {
     pub(super) fn decode(buf: &[u8]) -> Result<Self, Error> {
         let mut items: Vec<Encoded<Vec<u8>>> = bincode::DefaultOptions::new().deserialize(buf)?;
 
+        let path = items.pop().unwrap().decode()?;
+        let path = Nibbles::<0>::new(&path);
+        let (path, _term) = PartialPath::from_nibbles(path.into_iter());
+
         // we've already validated the size, that's why we can safely unwrap
         let data = items.pop().unwrap().decode()?;
         // Extract the value of the branch node and set to None if it's an empty Vec
@@ -150,9 +156,6 @@ impl BranchNode {
             chd_encoded[i] = Some(data).filter(|data| !data.is_empty());
         }
 
-        // TODO: add path
-        let path = Vec::new().into();
-
         Ok(BranchNode::new(
             path,
             [None; Self::MAX_CHILDREN],
@@ -162,8 +165,8 @@ impl BranchNode {
     }
 
     pub(super) fn encode<S: ShaleStore<Node>>(&self, store: &S) -> Vec<u8> {
-        // TODO: add path to encoded node
-        let mut list = <[Encoded<Vec<u8>>; Self::MAX_CHILDREN + 1]>::default();
+        // path + children + value
+        let mut list = <[Encoded<Vec<u8>>; Self::MSIZE]>::default();
 
         for (i, c) in self.children.iter().enumerate() {
             match c {
@@ -187,6 +190,12 @@ impl BranchNode {
                         list[i] = Encoded::Raw(child_encoded.to_vec());
                     }
                 }
+
+                // I'm not sure that this case makes sense. Why would there be an encoded child if there isn't a
+                // a disk-address in the same slot?
+                // TODO:
+                // change the data-structure children: [(DiskAddress, Option<Vec<u8>>); Self::MAX_CHILDREN]
+                // because DiskAddress already has a "null" value.
                 None => {
                     // Check if there is already a calculated encoded value for the child, which
                     // can happen when manually constructing a trie from proof.
@@ -207,6 +216,11 @@ impl BranchNode {
                 Encoded::Data(bincode::DefaultOptions::new().serialize(val).unwrap());
         }
 
+        let path = from_nibbles(&self.path.encode(false)).collect::<Vec<_>>();
+
+        list[Self::MAX_CHILDREN + 1] =
+            Encoded::Data(bincode::DefaultOptions::new().serialize(&path).unwrap());
+
         bincode::DefaultOptions::new()
             .serialize(list.as_slice())
             .unwrap()
@@ -220,12 +234,18 @@ impl Storable for BranchNode {
         let children_encoded_len = self.children_encoded.iter().fold(0, |len, child| {
             len + optional_data_len::<EncodedChildLen, _>(child.as_ref())
         });
+        let path_len_size = size_of::<PathLen>() as u64;
+        let path_len = self.path.serialized_len();
 
-        children_len + data_len + children_encoded_len
+        children_len + data_len + children_encoded_len + path_len_size + path_len
     }
 
     fn serialize(&self, to: &mut [u8]) -> Result<(), crate::shale::ShaleError> {
         let mut cursor = Cursor::new(to);
+
+        let path: Vec<u8> = from_nibbles(&self.path.encode(false)).collect();
+        cursor.write_all(&[path.len() as PathLen])?;
+        cursor.write_all(&path)?;
 
         for child in &self.children {
             let bytes = child.map(|addr| addr.to_le_bytes()).unwrap_or_default();
@@ -258,9 +278,41 @@ impl Storable for BranchNode {
         mut addr: usize,
         mem: &T,
     ) -> Result<Self, crate::shale::ShaleError> {
+        const PATH_LEN_SIZE: u64 = size_of::<PathLen>() as u64;
         const DATA_LEN_SIZE: usize = size_of::<DataLen>();
         const BRANCH_HEADER_SIZE: u64 =
             BranchNode::MAX_CHILDREN as u64 * DiskAddress::MSIZE + DATA_LEN_SIZE as u64;
+
+        let path_len = mem
+            .get_view(addr, PATH_LEN_SIZE)
+            .ok_or(ShaleError::InvalidCacheView {
+                offset: addr,
+                size: PATH_LEN_SIZE,
+            })?
+            .as_deref();
+
+        addr += PATH_LEN_SIZE as usize;
+
+        let path_len = {
+            let mut buf = [0u8; PATH_LEN_SIZE as usize];
+            let mut cursor = Cursor::new(path_len);
+            cursor.read_exact(buf.as_mut())?;
+
+            PathLen::from_le_bytes(buf) as u64
+        };
+
+        let path = mem
+            .get_view(addr, path_len)
+            .ok_or(ShaleError::InvalidCacheView {
+                offset: addr,
+                size: path_len,
+            })?
+            .as_deref();
+
+        addr += path_len as usize;
+
+        let path: Vec<u8> = path.into_iter().flat_map(to_nibble_array).collect();
+        let path = PartialPath::decode(&path).0;
 
         let node_raw =
             mem.get_view(addr, BRANCH_HEADER_SIZE)
@@ -347,8 +399,7 @@ impl Storable for BranchNode {
         }
 
         let node = BranchNode {
-            // TODO: add path
-            path: Vec::new().into(),
+            path,
             children,
             value,
             children_encoded,

@@ -1372,7 +1372,7 @@ mod tests {
         // TODO: add path
         // TODO: don't actually add path, but this should be reset to 1 when all the other "add path"
         // TODOs are done.
-        let cache = shale::ObjCache::new(100);
+        let cache = shale::ObjCache::new(1);
         let space =
             shale::compact::CompactSpace::new(mem_meta, mem_payload, compact_header, cache, 10, 16)
                 .expect("CompactSpace init fail");
@@ -1381,9 +1381,14 @@ mod tests {
         Merkle::new(store)
     }
 
-    fn branch(value: Vec<u8>, encoded_child: Option<Vec<u8>>) -> Node {
+    fn branch(path: &[u8], value: &[u8], encoded_child: Option<Vec<u8>>) -> Node {
+        let (path, value) = (path.to_vec(), value.to_vec());
+        let path = Nibbles::<0>::new(&path);
+        let path = PartialPath(path.into_iter().collect());
+
         let children = Default::default();
-        let value = Some(value).map(Data);
+        // TODO: Properly test empty data as a value
+        let value = Some(value).filter(|val| val.len() > 0).map(Data);
         let mut children_encoded = <[Option<Vec<u8>>; BranchNode::MAX_CHILDREN]>::default();
 
         if let Some(child) = encoded_child {
@@ -1391,7 +1396,7 @@ mod tests {
         }
 
         Node::from_branch(BranchNode {
-            path: vec![].into(),
+            path,
             children,
             value,
             children_encoded,
@@ -1399,10 +1404,16 @@ mod tests {
     }
 
     #[test_case(leaf(vec![1, 2, 3], vec![4, 5]) ; "leaf encoding")]
-    #[test_case(branch(b"value".to_vec(), vec![1, 2, 3].into()) ; "branch with value")]
-    #[test_case(branch(b"value".to_vec(), None); "branch without value")]
+    #[test_case(branch(b"", b"", None); "branch without path value or children")]
+    #[test_case(branch(b"", b"value", None) ; "branch with value")]
+    #[test_case(branch(&[2], b"", None); "branch with path")]
+    #[test_case(branch(b"", b"", vec![1, 2, 3].into()); "branch with children")]
+    #[test_case(branch(&[2], b"value", None); "branch with path and value")]
+    #[test_case(branch(b"", b"value", vec![1, 2, 3].into()); "branch with value and children")]
+    #[test_case(branch(&[2], b"", vec![1, 2, 3].into()); "branch with path and children")]
+    #[test_case(branch(&[2], b"value", vec![1, 2, 3].into()); "branch with path value and children")]
     #[test_case(extension(vec![1, 2, 3], DiskAddress::null(), vec![4, 5].into()) ; "extension without child address")]
-    fn encode_(node: Node) {
+    fn encode(node: Node) {
         let merkle = create_test_merkle();
 
         let node_ref = merkle.put_node(node).unwrap();
