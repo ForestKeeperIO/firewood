@@ -395,7 +395,6 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                 .take()
                 .map(Ok)
                 .unwrap_or_else(|| self.get_node(root))?;
-            let node_ptr = node.as_ptr();
 
             let Some(current_nibble) = key_nibbles.next() else {
                 break Some((node, val));
@@ -480,7 +479,7 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                         let n_ptr = node.inner.as_branch().unwrap().children[next_nibble];
 
                         match n_ptr {
-                            Some(n_ptr) => (self.get_node(n_ptr)?, n_ptr),
+                            Some(n_ptr) => (node, n_ptr),
                             None => {
                                 // insert the leaf to the empty slot
                                 // create a new leaf
@@ -514,7 +513,7 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                         .collect::<Vec<_>>();
                     let n_path_len = n_path.len();
 
-                    if let Some((_ext_node, v)) = self.split(
+                    if let Some((node, v)) = self.split(
                         node,
                         &mut parents,
                         &rem_path,
@@ -532,7 +531,7 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                         // extension node's next pointer
                         val = v;
 
-                        (self.get_node(node_ptr)?, n_ptr)
+                        (node, n_ptr)
                     } else {
                         // successfully inserted
                         break None;
@@ -2022,5 +2021,37 @@ mod tests {
         };
 
         assert_eq!(verified, Some(value2.to_vec()));
+    }
+
+    // this was a specific failing case
+    #[test]
+    fn shared_path_on_insert() {
+        type Bytes = &'static [u8];
+        let pairs: Vec<(Bytes, Bytes)> = vec![
+            (
+                &[1, 1, 46, 82, 67, 218],
+                &[23, 252, 128, 144, 235, 202, 124, 243],
+            ),
+            (
+                &[1, 0, 0, 1, 1, 0, 63, 80],
+                &[99, 82, 31, 213, 180, 196, 49, 242],
+            ),
+            (
+                &[0, 0, 0, 169, 176, 15],
+                &[105, 211, 176, 51, 231, 182, 74, 207],
+            ),
+            (
+                &[1, 0, 0, 0, 53, 57, 93],
+                &[234, 139, 214, 220, 172, 38, 168, 164],
+            ),
+        ];
+
+        let mut merkle = create_test_merkle();
+        let root = merkle.init_root().unwrap();
+
+        for (key, val) in pairs {
+            let val = val.to_vec();
+            merkle.insert(key, val, root).unwrap()
+        }
     }
 }
