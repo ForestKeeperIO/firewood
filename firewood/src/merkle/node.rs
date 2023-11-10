@@ -27,7 +27,6 @@ pub use extension::ExtNode;
 pub use leaf::{LeafNode, SIZE as LEAF_NODE_SIZE};
 pub use partial_path::PartialPath;
 
-
 use crate::nibbles::Nibbles;
 
 use super::{TrieHash, TRIE_HASH_LEN};
@@ -472,11 +471,19 @@ pub(super) mod tests {
         Node::from_leaf(PartialPath(path), Data(data))
     }
 
-    pub fn branch(
+    pub fn branch<const N: usize, const M: usize, T, U>(
+        path: &[u8],
         repeated_disk_address: usize,
-        value: Option<Vec<u8>>,
-        repeated_encoded_child: Option<Vec<u8>>,
-    ) -> Node {
+        value: T,
+        repeated_encoded_child: U,
+    ) -> Node
+    where
+        T: Into<Option<&'static [u8; N]>>,
+        U: Into<Option<&'static [u8; M]>>,
+    {
+        let value = value.into().map(|val| val.to_vec()).map(Data);
+        let repeated_encoded_child = repeated_encoded_child.into().map(|val| val.to_vec());
+
         let children: [Option<DiskAddress>; BranchNode::MAX_CHILDREN] = from_fn(|i| {
             if i < BranchNode::MAX_CHILDREN / 2 {
                 DiskAddress::from(repeated_disk_address).into()
@@ -498,9 +505,9 @@ pub(super) mod tests {
             .unwrap_or_default();
 
         Node::from_branch(BranchNode {
-            path: vec![].into(),
+            path: PartialPath(path.to_vec()),
             children,
-            value: value.map(Data),
+            value,
             children_encoded,
         })
     }
@@ -517,12 +524,26 @@ pub(super) mod tests {
         }))
     }
 
+    struct Nil;
+
+    impl From<Nil> for Option<&'static [u8; 0]> {
+        fn from(_val: Nil) -> Self {
+            None
+        }
+    }
+
     #[test_case(leaf(vec![0x01, 0x02, 0x03], vec![0x04, 0x05]); "leaf_node")]
     #[test_case(extension(vec![0x01, 0x02, 0x03], DiskAddress::from(0x42), None); "extension with child address")]
     #[test_case(extension(vec![0x01, 0x02, 0x03], DiskAddress::null(), vec![0x01, 0x02, 0x03].into()) ; "extension without child address")]
-    #[test_case(branch(0x0a, b"hello world".to_vec().into(), None); "branch with data")]
-    #[test_case(branch(0x0a, None, vec![0x01, 0x02, 0x03].into()); "branch without data")]
-    fn test_encoding(node: Node) {
+    #[test_case(branch(&[], 0x0a, Nil, Nil); "branch with nothing")]
+    #[test_case(branch(&[1], 0x0a, Nil, Nil); "branch with path")]
+    #[test_case(branch(&[], 0x0a, b"value", Nil); "branch with data ")]
+    #[test_case(branch(&[], 0x0a, Nil, &[1, 2, 3]); "branch with children")]
+    #[test_case(branch(&[1], 0x0a, b"value", Nil); "branch with path and data")]
+    #[test_case(branch(&[1], 0x0a, Nil, &[1, 2, 3]); "branch with path and children")]
+    #[test_case(branch(&[], 0x0a, b"value", &[1, 2, 3]); "branch with data and children")]
+    #[test_case(branch(&[1], 0x0a, b"value", &[1, 2, 3]); "branch with path data and children")]
+    fn encoding(node: Node) {
         let mut bytes = vec![0; node.serialized_len() as usize];
 
         node.serialize(&mut bytes).unwrap();
