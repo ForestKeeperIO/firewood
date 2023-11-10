@@ -1,12 +1,11 @@
 use super::{Data, Encoded, Node};
 use crate::{
-    merkle::{NodeType, PartialPath, TRIE_HASH_LEN},
+    merkle::{PartialPath, TRIE_HASH_LEN},
     shale::{DiskAddress, Storable},
     shale::{ShaleError, ShaleStore},
 };
 use bincode::{Error, Options};
 use std::{
-    array::from_fn,
     fmt::{Debug, Error as FmtError, Formatter},
     io::{Cursor, Read, Write},
     mem::size_of,
@@ -309,13 +308,21 @@ impl Storable for BranchNode {
         for child in &mut children_encoded {
             const ENCODED_CHILD_LEN_SIZE: u64 = size_of::<EncodedChildLen>() as u64;
 
-            let len = mem
+            let len_raw = mem
                 .get_view(addr, ENCODED_CHILD_LEN_SIZE)
                 .ok_or(ShaleError::InvalidCacheView {
                     offset: addr,
                     size: ENCODED_CHILD_LEN_SIZE,
                 })?
-                .as_deref()[0] as u64;
+                .as_deref();
+
+            let mut cursor = Cursor::new(len_raw);
+
+            let len = {
+                let mut buf = [0; ENCODED_CHILD_LEN_SIZE as usize];
+                cursor.read_exact(buf.as_mut())?;
+                EncodedChildLen::from_le_bytes(buf) as u64
+            };
 
             addr += ENCODED_CHILD_LEN_SIZE as usize;
 
