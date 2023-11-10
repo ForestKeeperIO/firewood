@@ -1141,76 +1141,93 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
     where
         K: AsRef<[u8]>,
     {
-        let key_nibbles = Nibbles::<0>::new(key.as_ref());
-
         let mut proofs = HashMap::new();
+
         if root.is_null() {
             return Ok(Proof(proofs));
         }
 
-        // Skip the sentinel root
-        let root = self
-            .get_node(root)?
-            .inner
-            .as_branch()
-            .ok_or(MerkleError::NotBranchNode)?
-            .children[0];
-        let mut u_ref = match root {
-            Some(root) => self.get_node(root)?,
-            None => return Ok(Proof(proofs)),
+        let mut key_nibbles = Nibbles::<1>::new(key.as_ref()).into_iter();
+        let mut nodes: Vec<DiskAddress> = Vec::new();
+        let root = self.get_node(root)?;
+
+        let node = match (key_nibbles.next(), &root.inner.as_branch()) {
+            (Some(nibble), Some(branch)) => branch.children[nibble as usize],
+            _ => None,
         };
 
-        let mut nskip = 0;
-        let mut nodes: Vec<DiskAddress> = Vec::new();
+        let Some(node) = node else {
+            return Ok(Proof(proofs));
+        };
 
-        // TODO: use get_node_by_key (and write proper unit test)
-        for (i, nib) in key_nibbles.into_iter().enumerate() {
-            if nskip > 0 {
-                nskip -= 1;
-                continue;
-            }
-            nodes.push(u_ref.as_ptr());
-            let next_ptr: DiskAddress = match &u_ref.inner {
-                NodeType::Branch(n) => match n.children[nib as usize] {
-                    Some(c) => c,
-                    None => break,
-                },
+        let mut node = self.get_node(node)?;
+
+        loop {
+            nodes.push(node.as_ptr());
+
+            let Some(current_nibble) = key_nibbles.next() else {
+                break;
+            };
+
+            let next_ptr = match &node.inner {
+                NodeType::Branch(n) if n.path.len() == 0 => {
+                    match n.children[current_nibble as usize] {
+                        Some(child) => child,
+                        None => break,
+                    }
+                }
+                NodeType::Branch(n) => {
+                    let key_nibbles_contain_path =
+                        n.path.iter().copied().all(|branch_path_nibble| {
+                            key_nibbles.next() == Some(branch_path_nibble)
+                        });
+
+                    if !key_nibbles_contain_path {
+                        break;
+                    }
+
+                    let Some(next_nibble) = key_nibbles.next() else {
+                        break;
+                    };
+
+                    match n.children[next_nibble as usize] {
+                        Some(child) => child,
+                        None => break,
+                    }
+                }
                 NodeType::Leaf(_) => break,
                 NodeType::Extension(n) => {
-                    // the key passed in must match the entire remainder of this
-                    // extension node, otherwise we break out
-                    let n_path = &n.path;
-                    let remaining_path = key_nibbles.into_iter().skip(i);
-                    if remaining_path.size_hint().0 < n_path.len() {
-                        // all bytes aren't there
+                    let key_nibbles_contain_path = n
+                        .path
+                        .iter()
+                        .copied()
+                        .all(|ext_path_nibble| key_nibbles.next() == Some(ext_path_nibble));
+
+                    if !key_nibbles_contain_path {
                         break;
                     }
-                    if !remaining_path.take(n_path.len()).eq(n_path.iter().cloned()) {
-                        // contents aren't the same
-                        break;
-                    }
-                    nskip = n_path.len() - 1;
+
                     n.chd()
                 }
             };
-            u_ref = self.get_node(next_ptr)?;
+
+            node = self.get_node(next_ptr)?;
         }
 
-        match &u_ref.inner {
+        match &node.inner {
             NodeType::Branch(n) => {
                 if n.value.as_ref().is_some() {
-                    nodes.push(u_ref.as_ptr());
+                    nodes.push(node.as_ptr());
                 }
             }
             NodeType::Leaf(n) => {
                 if n.path.len() == 0 {
-                    nodes.push(u_ref.as_ptr());
+                    nodes.push(node.as_ptr());
                 }
             }
             _ => (),
         }
 
-        drop(u_ref);
         // Get the hashes of the nodes.
         for node in nodes {
             let node = self.get_node(node)?;
@@ -1218,6 +1235,7 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
             let hash: [u8; TRIE_HASH_LEN] = sha3::Keccak256::digest(encoded).into();
             proofs.insert(hash, encoded.to_vec());
         }
+
         Ok(Proof(proofs))
     }
 
