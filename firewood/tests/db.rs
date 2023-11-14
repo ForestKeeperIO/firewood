@@ -3,6 +3,7 @@
 
 use firewood::{
     db::{DbConfig, WalConfig},
+    proof::HashKey,
     v2::api::{self, BatchOp, Db as _, DbView, Proposal},
 };
 use tokio::task::block_in_place;
@@ -113,7 +114,7 @@ async fn test_revisions() {
             .create()
             .await;
         let mut dumped = VecDeque::new();
-        let mut hashes: VecDeque<api::HashKey> = VecDeque::new();
+        let mut hashes: VecDeque<HashKey> = VecDeque::new();
 
         for _ in 0..10 {
             {

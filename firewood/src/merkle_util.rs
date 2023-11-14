@@ -7,8 +7,7 @@ use crate::shale::{
 };
 use crate::{
     merkle::{Merkle, Node, Ref, RefMut, TrieHash},
-    proof::ProofError,
-    v2::api::Proof,
+    proof::{Proof, ProofError},
 };
 use std::{num::NonZeroUsize, sync::Arc};
 use thiserror::Error;

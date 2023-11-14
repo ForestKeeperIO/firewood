@@ -1,8 +1,7 @@
 // Copyright (C) 2023, Ava Labs, Inc. All rights reserved.
 // See the file LICENSE.md for licensing terms.
 use crate::shale::{self, disk_address::DiskAddress, ObjWriteError, ShaleError, ShaleStore};
-use crate::v2::api;
-use crate::{nibbles::Nibbles, v2::api::Proof};
+use crate::{nibbles::Nibbles, proof::Proof, v2::api};
 use futures::{Stream, StreamExt, TryStreamExt};
 use sha3::Digest;
 use std::{
@@ -1199,7 +1198,20 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                         None => break,
                     }
                 }
-                NodeType::Leaf(_) => break,
+                NodeType::Leaf(n) => {
+                    let key_nibbles_contain_path = n
+                        .path
+                        .iter()
+                        .copied()
+                        .all(|leaf_path_nibble| key_nibbles.next() == Some(leaf_path_nibble));
+
+                    // TODO: fix this
+                    if !key_nibbles_contain_path {
+                        break;
+                    }
+
+                    break;
+                }
                 NodeType::Extension(n) => {
                     let key_nibbles_contain_path = n
                         .path
@@ -1218,19 +1230,19 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
             node = self.get_node(next_ptr)?;
         }
 
-        match &node.inner {
-            NodeType::Branch(n) => {
-                if n.value.as_ref().is_some() {
-                    nodes.push(node.as_ptr());
-                }
-            }
-            NodeType::Leaf(n) => {
-                if n.path.len() == 0 {
-                    nodes.push(node.as_ptr());
-                }
-            }
-            _ => (),
-        }
+        // match &node.inner {
+        //     NodeType::Branch(n) => {
+        //         if n.value.as_ref().is_some() {
+        //             nodes.push(node.as_ptr());
+        //         }
+        //     }
+        //     NodeType::Leaf(n) => {
+        //         if n.path.len() == 0 {
+        //             nodes.push(node.as_ptr());
+        //         }
+        //     }
+        //     _ => (),
+        // }
 
         // Get the hashes of the nodes.
         for node in nodes {

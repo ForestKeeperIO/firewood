@@ -1,9 +1,11 @@
 // Copyright (C) 2023, Ava Labs, Inc. All rights reserved.
 // See the file LICENSE.md for licensing terms.
 
-use std::{collections::HashMap, fmt::Debug, sync::Arc};
+use std::{fmt::Debug, sync::Arc};
 
 use async_trait::async_trait;
+
+use crate::proof::{HashKey, Proof};
 
 /// A `KeyType` is something that can be xcast to a u8 reference,
 /// and can be sent and shared across threads. References with
@@ -21,14 +23,6 @@ impl<T> KeyType for T where T: AsRef<[u8]> + Send + Sync + Debug {}
 pub trait ValueType: AsRef<[u8]> + Send + Sync + Debug + 'static {}
 
 impl<T> ValueType for T where T: AsRef<[u8]> + Send + Sync + Debug + 'static {}
-
-/// The type and size of a single hash key
-/// These are 256-bit hashes that are used for a variety of reasons:
-///  - They identify a version of the datastore at a specific point
-///    in time
-///  - They are used to provide integrity at different points in a
-///    proof
-pub type HashKey = [u8; 32];
 
 /// A key/value pair operation. Only put (upsert) and delete are
 /// supported
@@ -85,12 +79,6 @@ pub struct RangeProof<K, V> {
     pub last_key_proof: Proof<Vec<u8>>,
     pub middle: Vec<(K, V)>,
 }
-
-/// A proof that a single key is present
-///
-/// The generic N represents the storage for the node data
-#[derive(Clone, Debug)]
-pub struct Proof<N>(pub HashMap<HashKey, N>);
 
 /// The database interface, which includes a type for a static view of
 /// the database (the DbView). The most common implementation of the DbView
