@@ -1,16 +1,13 @@
 // Copyright (C) 2023, Ava Labs, Inc. All rights reserved.
 // See the file LICENSE.md for licensing terms.
 
-use std::{collections::BTreeMap, fmt::Debug, sync::Arc};
-
-use async_trait::async_trait;
-
+use super::api::{KeyType, ValueType};
 use crate::{
-    proof::{HashKey, Proof},
+    merkle::proof::{HashKey, Proof},
     v2::api,
 };
-
-use super::api::{KeyType, ValueType};
+use async_trait::async_trait;
+use std::{collections::BTreeMap, fmt::Debug, sync::Arc};
 
 #[derive(Clone, Debug)]
 pub(crate) enum KeyOp<V: ValueType> {

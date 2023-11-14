@@ -1,13 +1,15 @@
 // Copyright (C) 2023, Ava Labs, Inc. All rights reserved.
 // See the file LICENSE.md for licensing terms.
 
-use crate::shale::{
-    self, cached::DynamicMem, compact::CompactSpace, disk_address::DiskAddress, CachedStore,
-    ShaleStore, StoredView,
-};
 use crate::{
-    merkle::{Merkle, Node, Ref, RefMut, TrieHash},
-    proof::{Proof, ProofError},
+    merkle::{
+        proof::{Proof, ProofError},
+        Merkle, Node, Ref, RefMut, TrieHash,
+    },
+    shale::{
+        self, cached::DynamicMem, compact::CompactSpace, disk_address::DiskAddress, CachedStore,
+        ShaleStore, StoredView,
+    },
 };
 use std::{num::NonZeroUsize, sync::Arc};
 use thiserror::Error;

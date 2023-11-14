@@ -1,17 +1,22 @@
 // Copyright (C) 2023, Ava Labs, Inc. All rights reserved.
 // See the file LICENSE.md for licensing terms.
 
-use crate::shale::{self, disk_address::DiskAddress, ObjWriteError, ShaleError, ShaleStore};
-use crate::{nibbles::Nibbles, proof::Proof};
+use crate::{
+    nibbles::Nibbles,
+    shale::{self, disk_address::DiskAddress, ObjWriteError, ShaleError, ShaleStore},
+};
 use sha3::Digest;
 use std::{cmp::Ordering, collections::HashMap, io::Write, iter::once, sync::OnceLock};
 use thiserror::Error;
 
 mod node;
+pub mod proof;
 mod trie_hash;
 
 pub use node::{BranchNode, Data, ExtNode, LeafNode, Node, NodeType, PartialPath};
 pub use trie_hash::{TrieHash, TRIE_HASH_LEN};
+
+use proof::Proof;
 
 type ObjRef<'a> = shale::ObjRef<'a, Node>;
 type ParentRefs<'a> = Vec<(ObjRef<'a>, u8)>;

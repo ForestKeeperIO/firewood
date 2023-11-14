@@ -1,9 +1,11 @@
 // Copyright (C) 2023, Ava Labs, Inc. All rights reserved.
 // See the file LICENSE.md for licensing terms.
 
-use super::api::{Batch, Db, DbView, Error, KeyType, RangeProof, ValueType};
-use super::propose::{Proposal, ProposalBase};
-use crate::proof::{HashKey, Proof};
+use super::{
+    api::{Batch, Db, DbView, Error, KeyType, RangeProof, ValueType},
+    propose::{Proposal, ProposalBase},
+};
+use crate::merkle::proof::{HashKey, Proof};
 use async_trait::async_trait;
 use std::sync::Arc;
 

@@ -14,8 +14,10 @@ pub use crate::{
 };
 use crate::{
     file,
-    merkle::{Merkle, MerkleError, Node, TrieHash, TRIE_HASH_LEN},
-    proof::{HashKey, Proof, ProofError},
+    merkle::{
+        proof::{HashKey, Proof, ProofError},
+        Merkle, MerkleError, Node, TrieHash, TRIE_HASH_LEN,
+    },
     storage::{
         buffer::{DiskBuffer, DiskBufferRequester},
         CachedSpace, MemStoreR, SpaceWrite, StoreConfig, StoreDelta, StoreRevMut, StoreRevShared,
