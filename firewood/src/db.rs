@@ -15,13 +15,13 @@ pub use crate::{
 use crate::{
     file,
     merkle::{Merkle, MerkleError, Node, TrieHash, TRIE_HASH_LEN},
-    proof::ProofError,
+    proof::{HashKey, Proof, ProofError},
     storage::{
         buffer::{DiskBuffer, DiskBufferRequester},
         CachedSpace, MemStoreR, SpaceWrite, StoreConfig, StoreDelta, StoreRevMut, StoreRevShared,
         ZeroStore, PAGE_SIZE_NBIT,
     },
-    v2::api::{self, HashKey, KeyType, Proof, ValueType},
+    v2::api::{self, KeyType, ValueType},
 };
 use async_trait::async_trait;
 use bytemuck::{cast_slice, AnyBitPattern};
@@ -277,7 +277,7 @@ pub struct DbRev<S> {
 
 #[async_trait]
 impl<S: ShaleStore<Node> + Send + Sync> api::DbView for DbRev<S> {
-    async fn root_hash(&self) -> Result<api::HashKey, api::Error> {
+    async fn root_hash(&self) -> Result<HashKey, api::Error> {
         block_in_place(|| self.merkle.root_hash(self.header.kv_root))
             .map(|h| *h)
             .map_err(|e| api::Error::IO(std::io::Error::new(ErrorKind::Other, e)))

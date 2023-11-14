@@ -2,6 +2,7 @@
 // See the file LICENSE.md for licensing terms.
 
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::ops::Deref;
 
 use crate::shale::{disk_address::DiskAddress, ShaleError, ShaleStore};
@@ -15,8 +16,23 @@ use crate::{
     db::DbError,
     merkle::{to_nibble_array, Merkle, MerkleError, Node, NodeType},
     merkle_util::{new_merkle, DataStoreError, MerkleSetup},
-    v2::api::Proof,
 };
+
+/// A proof that a single key is present
+///
+/// The generic N represents the storage for the node data
+#[derive(Debug)]
+pub struct Proof<N>(pub HashMap<HashKey, N>);
+
+/// The type and size of a single hash key
+/// These are 256-bit hashes that are used for a variety of reasons:
+///  - They identify a version of the datastore at a specific point
+///    in time
+///  - They are used to provide integrity at different points in a
+///    proof
+pub type HashKey = [u8; 32];
+
+// TODO: move this file inside the merkle mod.
 
 #[derive(Debug, Error)]
 pub enum ProofError {
