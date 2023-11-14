@@ -2,9 +2,8 @@
 // See the file LICENSE.md for licensing terms.
 
 use firewood::{
-    merkle::Node,
+    merkle::{proof::ProofError, Node, Proof},
     merkle_util::{new_merkle, DataStoreError, MerkleSetup},
-    proof::{Proof, ProofError},
     // TODO: we should not be using shale from an integration test
     shale::{cached::DynamicMem, compact::CompactSpace},
 };

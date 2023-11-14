@@ -6,10 +6,12 @@ use super::{
     DbHeader, DbInner, DbRev, DbRevInner, SharedStore, Store, Universe, MERKLE_META_SPACE,
     MERKLE_PAYLOAD_SPACE, ROOT_HASH_SPACE,
 };
-use crate::proof::{HashKey, Proof};
-use crate::shale::CachedStore;
 use crate::{
-    merkle::{TrieHash, TRIE_HASH_LEN},
+    merkle::{
+        proof::{HashKey, Proof},
+        TrieHash, TRIE_HASH_LEN,
+    },
+    shale::CachedStore,
     storage::{buffer::BufferWrite, AshRecord, StoreRevMut},
     v2::api::{self, KeyType, ValueType},
 };

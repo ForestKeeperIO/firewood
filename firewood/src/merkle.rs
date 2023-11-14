@@ -1,7 +1,10 @@
 // Copyright (C) 2023, Ava Labs, Inc. All rights reserved.
 // See the file LICENSE.md for licensing terms.
-use crate::shale::{self, disk_address::DiskAddress, ObjWriteError, ShaleError, ShaleStore};
-use crate::{nibbles::Nibbles, proof::Proof, v2::api};
+use crate::{
+    nibbles::Nibbles,
+    shale::{self, disk_address::DiskAddress, ObjWriteError, ShaleError, ShaleStore},
+    v2::api,
+};
 use futures::{Stream, StreamExt, TryStreamExt};
 use sha3::Digest;
 use std::{
@@ -11,9 +14,11 @@ use std::{
 use thiserror::Error;
 
 mod node;
+pub mod proof;
 mod trie_hash;
 
 pub use node::{BranchNode, Data, ExtNode, LeafNode, Node, NodeType, PartialPath};
+pub use proof::Proof;
 pub use trie_hash::{TrieHash, TRIE_HASH_LEN};
 
 type ObjRef<'a> = shale::ObjRef<'a, Node>;

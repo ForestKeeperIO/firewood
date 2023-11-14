@@ -9,7 +9,7 @@ use async_trait::async_trait;
 
 use crate::{
     db::DbError,
-    proof::HashKey,
+    merkle::proof::HashKey,
     v2::api::{self, Batch, KeyType, ValueType},
 };
 

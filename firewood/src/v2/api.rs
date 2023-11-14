@@ -5,7 +5,7 @@ use std::{fmt::Debug, sync::Arc};
 
 use async_trait::async_trait;
 
-use crate::proof::{HashKey, Proof};
+use crate::merkle::proof::{HashKey, Proof};
 
 /// A `KeyType` is something that can be xcast to a u8 reference,
 /// and can be sent and shared across threads. References with

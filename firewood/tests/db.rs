@@ -3,7 +3,7 @@
 
 use firewood::{
     db::{DbConfig, WalConfig},
-    proof::HashKey,
+    merkle::proof::HashKey,
     v2::api::{self, BatchOp, Db as _, DbView, Proposal},
 };
 use tokio::task::block_in_place;
