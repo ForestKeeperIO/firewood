@@ -261,8 +261,8 @@ impl Node {
         Self::from(NodeType::Branch(node.into()))
     }
 
-    pub fn from_leaf(path: PartialPath, data: Data) -> Self {
-        Self::from(NodeType::Leaf(LeafNode { path, data }))
+    pub fn from_leaf(leaf: LeafNode) -> Self {
+        Self::from(NodeType::Leaf(leaf))
     }
 
     pub fn inner(&self) -> &NodeType {
@@ -474,7 +474,7 @@ pub(super) mod tests {
     use test_case::test_case;
 
     pub fn leaf(path: Vec<u8>, data: Vec<u8>) -> Node {
-        Node::from_leaf(PartialPath(path), Data(data))
+        Node::from_leaf(LeafNode::new(PartialPath(path), Data(data)))
     }
 
     pub fn branch<const N: usize, const M: usize, T, U>(

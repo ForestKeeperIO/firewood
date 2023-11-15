@@ -198,7 +198,10 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                 node.rehash();
             })?;
 
-            let new_node = Node::from_leaf(PartialPath(new_node_path.to_vec()), Data(val));
+            let new_node = Node::from_leaf(LeafNode::new(
+                PartialPath(new_node_path.to_vec()),
+                Data(val),
+            ));
             let leaf_address = self.put_node(new_node)?.as_ptr();
 
             let mut chd = [None; BranchNode::MAX_CHILDREN];
@@ -314,10 +317,10 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                     }
                     // insert path is greather than the path of the leaf
                     (Ordering::Greater, Some(n_value)) => {
-                        let leaf = Node::from_leaf(
+                        let leaf = Node::from_leaf(LeafNode::new(
                             PartialPath(insert_path[n_path.len() + 1..].to_vec()),
                             Data(val),
-                        );
+                        ));
 
                         let leaf_address = self.put_node(leaf)?.as_ptr();
 
@@ -385,26 +388,21 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
         let mut deleted = Vec::new();
         let mut parents = Vec::new();
 
-        let mut next_node = None;
-
         // we use Nibbles::<1> so that 1 zero nibble is at the front
         // this is for the sentinel node, which avoids moving the root
         // and always only has one child
         let mut key_nibbles = Nibbles::<1>::new(key.as_ref()).into_iter();
 
+        let mut node = self.get_node(root)?;
+
         // walk down the merkle tree starting from next_node, currently the root
         // return None if the value is inserted
         let next_node_and_val = loop {
-            let mut node = next_node
-                .take()
-                .map(Ok)
-                .unwrap_or_else(|| self.get_node(root))?;
-
             let Some(current_nibble) = key_nibbles.next() else {
                 break Some((node, val));
             };
 
-            let (node, next_node_ptr) = match &node.inner {
+            let (node_ref, next_node_ptr) = match &node.inner {
                 // For a Branch node, we look at the child pointer. If it points
                 // to another node, we walk down that. Otherwise, we can store our
                 // value as a leaf and we're done
@@ -435,10 +433,10 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                             // insert the leaf to the empty slot
                             // create a new leaf
                             let leaf_ptr = self
-                                .put_node(Node::from_leaf(
+                                .put_node(Node::from_leaf(LeafNode::new(
                                     PartialPath(key_nibbles.collect()),
                                     Data(val),
-                                ))?
+                                )))?
                                 .as_ptr();
                             // set the current child to point to this leaf
                             node.write(|u| {
@@ -488,10 +486,10 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                                 // insert the leaf to the empty slot
                                 // create a new leaf
                                 let leaf_ptr = self
-                                    .put_node(Node::from_leaf(
+                                    .put_node(Node::from_leaf(LeafNode::new(
                                         PartialPath(key_nibbles.collect()),
                                         Data(val),
-                                    ))?
+                                    )))?
                                     .as_ptr();
                                 // set the current child to point to this leaf
                                 node.write(|u| {
@@ -544,8 +542,8 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
             };
 
             // push another parent, and follow the next pointer
-            parents.push((node, current_nibble));
-            next_node = self.get_node(next_node_ptr)?.into();
+            parents.push((node_ref, current_nibble));
+            node = self.get_node(next_node_ptr)?;
         };
 
         if let Some((mut node, val)) = next_node_and_val {
@@ -655,7 +653,7 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                     // from: [p: Branch] -> [b (v)]x -> [Leaf]x
                     // to: [p: Branch] -> [Leaf (v)]
                     let leaf = self
-                        .put_node(Node::from_leaf(PartialPath(Vec::new()), val))?
+                        .put_node(Node::from_leaf(LeafNode::new(PartialPath(Vec::new()), val)))?
                         .as_ptr();
                     p_ref
                         .write(|p| {
@@ -668,10 +666,10 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                     // from: P -> [p: Ext]x -> [b (v)]x -> [leaf]x
                     // to: P -> [Leaf (v)]
                     let leaf = self
-                        .put_node(Node::from_leaf(
+                        .put_node(Node::from_leaf(LeafNode::new(
                             PartialPath(n.path.clone().into_inner()),
                             val,
-                        ))?
+                        )))?
                         .as_ptr();
                     deleted.push(p_ptr);
                     set_parent(leaf, parents);
