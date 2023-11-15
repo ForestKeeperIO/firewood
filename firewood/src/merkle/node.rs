@@ -259,8 +259,8 @@ impl Node {
         Self::from(NodeType::Branch(node.into()))
     }
 
-    pub fn from_leaf(path: PartialPath, data: Data) -> Self {
-        Self::from(NodeType::Leaf(LeafNode { path, data }))
+    pub fn from_leaf(leaf: LeafNode) -> Self {
+        Self::from(NodeType::Leaf(leaf))
     }
 
     pub fn inner(&self) -> &NodeType {

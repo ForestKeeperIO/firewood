@@ -195,7 +195,10 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                 node.rehash();
             })?;
 
-            let new_node = Node::from_leaf(PartialPath(new_node_path.to_vec()), Data(val));
+            let new_node = Node::from_leaf(LeafNode::new(
+                PartialPath(new_node_path.to_vec()),
+                Data(val),
+            ));
             let leaf_address = self.put_node(new_node)?.as_ptr();
 
             let mut chd = [None; BranchNode::MAX_CHILDREN];
@@ -311,10 +314,10 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                     }
                     // insert path is greather than the path of the leaf
                     (Ordering::Greater, Some(n_value)) => {
-                        let leaf = Node::from_leaf(
+                        let leaf = Node::from_leaf(LeafNode::new(
                             PartialPath(insert_path[n_path.len() + 1..].to_vec()),
                             Data(val),
-                        );
+                        ));
 
                         let leaf_address = self.put_node(leaf)?.as_ptr();
 
@@ -432,10 +435,10 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                             // insert the leaf to the empty slot
                             // create a new leaf
                             let leaf_ptr = self
-                                .put_node(Node::from_leaf(
+                                .put_node(Node::from_leaf(LeafNode::new(
                                     PartialPath(key_nibbles.collect()),
                                     Data(val),
-                                ))?
+                                )))?
                                 .as_ptr();
                             // set the current child to point to this leaf
                             node.write(|u| {
@@ -485,10 +488,10 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                                 // insert the leaf to the empty slot
                                 // create a new leaf
                                 let leaf_ptr = self
-                                    .put_node(Node::from_leaf(
+                                    .put_node(Node::from_leaf(LeafNode::new(
                                         PartialPath(key_nibbles.collect()),
                                         Data(val),
-                                    ))?
+                                    )))?
                                     .as_ptr();
                                 // set the current child to point to this leaf
                                 node.write(|u| {
@@ -652,7 +655,7 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                     // from: [p: Branch] -> [b (v)]x -> [Leaf]x
                     // to: [p: Branch] -> [Leaf (v)]
                     let leaf = self
-                        .put_node(Node::from_leaf(PartialPath(Vec::new()), val))?
+                        .put_node(Node::from_leaf(LeafNode::new(PartialPath(Vec::new()), val)))?
                         .as_ptr();
                     p_ref
                         .write(|p| {
@@ -665,10 +668,10 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                     // from: P -> [p: Ext]x -> [b (v)]x -> [leaf]x
                     // to: P -> [Leaf (v)]
                     let leaf = self
-                        .put_node(Node::from_leaf(
+                        .put_node(Node::from_leaf(LeafNode::new(
                             PartialPath(n.path.clone().into_inner()),
                             val,
-                        ))?
+                        )))?
                         .as_ptr();
                     deleted.push(p_ptr);
                     set_parent(leaf, parents);
