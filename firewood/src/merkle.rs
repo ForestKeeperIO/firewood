@@ -1155,103 +1155,29 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
             return Ok(Proof(proofs));
         }
 
-        let mut key_nibbles = Nibbles::<1>::new(key.as_ref()).into_iter();
-        let mut nodes: Vec<DiskAddress> = Vec::new();
-        let root = self.get_node(root)?;
+        let root_node = self.get_node(root)?;
 
-        let node = match (key_nibbles.next(), &root.inner.as_branch()) {
-            (Some(nibble), Some(branch)) => branch.children[nibble as usize],
-            _ => None,
-        };
+        let mut nodes = Vec::new();
 
-        let Some(node) = node else {
-            return Ok(Proof(proofs));
-        };
+        let node = self.get_node_by_key_with_callback(root_node, key, {
+            let (mut skip_root, nodes) = (true, &mut nodes);
 
-        let mut node = self.get_node(node)?;
-
-        loop {
-            nodes.push(node.as_ptr());
-
-            let Some(current_nibble) = key_nibbles.next() else {
-                break;
-            };
-
-            let next_ptr = match &node.inner {
-                NodeType::Branch(n) if n.path.len() == 0 => {
-                    match n.children[current_nibble as usize] {
-                        Some(child) => child,
-                        None => break,
-                    }
+            move |node, _| {
+                if skip_root {
+                    skip_root = false;
+                } else {
+                    nodes.push(node);
                 }
-                NodeType::Branch(n) => {
-                    let key_nibbles_contain_path =
-                        n.path.iter().copied().all(|branch_path_nibble| {
-                            key_nibbles.next() == Some(branch_path_nibble)
-                        });
+            }
+        })?;
 
-                    if !key_nibbles_contain_path {
-                        break;
-                    }
-
-                    let Some(next_nibble) = key_nibbles.next() else {
-                        break;
-                    };
-
-                    match n.children[next_nibble as usize] {
-                        Some(child) => child,
-                        None => break,
-                    }
-                }
-                NodeType::Leaf(n) => {
-                    let key_nibbles_contain_path = n
-                        .path
-                        .iter()
-                        .copied()
-                        .all(|leaf_path_nibble| key_nibbles.next() == Some(leaf_path_nibble));
-
-                    // TODO: fix this
-                    if !key_nibbles_contain_path {
-                        break;
-                    }
-
-                    break;
-                }
-                NodeType::Extension(n) => {
-                    let key_nibbles_contain_path = n
-                        .path
-                        .iter()
-                        .copied()
-                        .all(|ext_path_nibble| key_nibbles.next() == Some(ext_path_nibble));
-
-                    if !key_nibbles_contain_path {
-                        break;
-                    }
-
-                    n.chd()
-                }
-            };
-
-            node = self.get_node(next_ptr)?;
+        if let Some(node) = node {
+            nodes.push(node);
         }
-
-        // match &node.inner {
-        //     NodeType::Branch(n) => {
-        //         if n.value.as_ref().is_some() {
-        //             nodes.push(node.as_ptr());
-        //         }
-        //     }
-        //     NodeType::Leaf(n) => {
-        //         if n.path.len() == 0 {
-        //             nodes.push(node.as_ptr());
-        //         }
-        //     }
-        //     _ => (),
-        // }
 
         // Get the hashes of the nodes.
         for node in nodes {
-            let node = self.get_node(node)?;
+            // let node = self.get_node(node)?;
             let encoded = <&[u8]>::clone(&node.get_encoded::<S>(self.store.as_ref()));
             let hash: [u8; TRIE_HASH_LEN] = sha3::Keccak256::digest(encoded).into();
             proofs.insert(hash, encoded.to_vec());
@@ -2088,5 +2014,43 @@ mod tests {
             let val = val.to_vec();
             merkle.insert(key, val, root).unwrap()
         }
+    }
+
+    #[test]
+    fn single_key_proof_with_one_node() {
+        let mut merkle = create_test_merkle();
+        let root = merkle.init_root().unwrap();
+        let key = b"key";
+        let value = b"value";
+
+        merkle.insert(key, value.to_vec(), root).unwrap();
+        let root_hash = merkle.root_hash(root).unwrap();
+
+        let proof = merkle.prove(key, root).unwrap();
+
+        let verified = proof.verify(key, root_hash.0).unwrap();
+
+        assert_eq!(verified, Some(value.to_vec()));
+    }
+
+    #[test]
+    fn two_key_proof_without_shared_path() {
+        let mut merkle = create_test_merkle();
+        let root = merkle.init_root().unwrap();
+
+        let key1 = &[0x00];
+        let key2 = &[0xff];
+
+        merkle.insert(key1, key1.to_vec(), root).unwrap();
+        merkle.insert(key2, key2.to_vec(), root).unwrap();
+
+        let root_hash = merkle.root_hash(root).unwrap();
+
+        let verified = {
+            let proof = merkle.prove(key1, root).unwrap();
+            proof.verify(key1, root_hash.0).unwrap()
+        };
+
+        assert_eq!(verified.as_deref(), Some(key1.as_slice()));
     }
 }
