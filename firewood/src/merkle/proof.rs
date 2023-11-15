@@ -119,7 +119,7 @@ impl<N: AsRef<[u8]> + Send> Proof<N> {
     /// proof contains invalid trie nodes or the wrong value.
     ///
     /// The generic N represents the storage for the node data
-    pub fn verify_proof<K: AsRef<[u8]>>(
+    pub fn verify<K: AsRef<[u8]>>(
         &self,
         key: K,
         root_hash: [u8; 32],
@@ -134,12 +134,16 @@ impl<N: AsRef<[u8]> + Send> Proof<N> {
                 .get(&cur_hash)
                 .ok_or(ProofError::ProofNodeMissing)?;
             let node = NodeType::decode(cur_proof.as_ref())?;
+            // TODO: I think this will currently fail if the key is &[];
             let (sub_proof, traversed_nibbles) = locate_subproof(key_nibbles, node)?;
             key_nibbles = traversed_nibbles;
 
             cur_hash = match sub_proof {
                 // Return when reaching the end of the key.
-                Some(p) if key_nibbles.size_hint().0 == 0 => return Ok(Some(p.encoded)),
+                Some(SubProof {
+                    encoded,
+                    hash: None,
+                }) if key_nibbles.size_hint().0 == 0 => return Ok(Some(encoded)),
                 // The trie doesn't contain the key.
                 Some(SubProof {
                     hash: Some(hash), ..
@@ -523,7 +527,7 @@ fn locate_subproof(
                 return Ok((None, Nibbles::<0>::new(&[]).into_iter()));
             }
 
-            let encoded = n.data().to_vec();
+            let encoded: Vec<u8> = n.data().to_vec();
 
             let sub_proof = SubProof {
                 encoded,
@@ -549,7 +553,28 @@ fn locate_subproof(
         }
         NodeType::Branch(_) if key_nibbles.size_hint().0 == 0 => Err(ProofError::NoSuchNode),
         NodeType::Branch(n) => {
-            let index = key_nibbles.next().unwrap() as usize;
+            let partial_path = &n.path.0;
+
+            let does_not_match = key_nibbles.size_hint().0 < partial_path.len()
+                || !partial_path
+                    .iter()
+                    .all(|val| key_nibbles.next() == Some(*val));
+
+            if does_not_match {
+                return Ok((None, Nibbles::<0>::new(&[]).into_iter()));
+            }
+
+            let Some(index) = key_nibbles.next().map(|nib| nib as usize) else {
+                let encoded = n.value;
+
+                let sub_proof = encoded.map(|encoded| SubProof {
+                    encoded: encoded.into_inner(),
+                    hash: None,
+                });
+
+                return Ok((sub_proof.into(), key_nibbles));
+            };
+
             // consume items returning the item at index
             let data = n.chd_encode()[index]
                 .as_ref()
@@ -560,22 +585,22 @@ fn locate_subproof(
     }
 }
 
-fn generate_subproof(data: Vec<u8>) -> Result<SubProof, ProofError> {
-    match data.len() {
+fn generate_subproof(encoded: Vec<u8>) -> Result<SubProof, ProofError> {
+    match encoded.len() {
         0..=31 => {
-            let sub_hash = sha3::Keccak256::digest(&data).into();
+            let sub_hash = sha3::Keccak256::digest(&encoded).into();
             Ok(SubProof {
-                encoded: data,
+                encoded,
                 hash: Some(sub_hash),
             })
         }
 
         32 => {
-            let sub_hash: &[u8] = &data;
+            let sub_hash: &[u8] = &encoded;
             let sub_hash = sub_hash.try_into().unwrap();
 
             Ok(SubProof {
-                encoded: data,
+                encoded,
                 hash: Some(sub_hash),
             })
         }

@@ -3,6 +3,7 @@
 
 use firewood::{
     db::{DbConfig, WalConfig},
+    merkle::proof::HashKey,
     v2::api::{self, BatchOp, Db as _, DbView, Proposal},
 };
 use tokio::task::block_in_place;
@@ -113,7 +114,7 @@ async fn test_revisions() {
             .create()
             .await;
         let mut dumped = VecDeque::new();
-        let mut hashes: VecDeque<api::HashKey> = VecDeque::new();
+        let mut hashes: VecDeque<HashKey> = VecDeque::new();
 
         for _ in 0..10 {
             {
@@ -222,7 +223,7 @@ async fn create_db_issue_proof() {
 
     match rev.single_key_proof(key).await {
         Ok(proof) => {
-            let verification = proof.unwrap().verify_proof(key, root_hash).unwrap();
+            let verification = proof.unwrap().verify(key, root_hash).unwrap();
             assert!(verification.is_some());
         }
         Err(e) => {
