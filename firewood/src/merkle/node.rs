@@ -472,7 +472,7 @@ pub(super) mod tests {
     use test_case::test_case;
 
     pub fn leaf(path: Vec<u8>, data: Vec<u8>) -> Node {
-        Node::from_leaf(PartialPath(path), Data(data))
+        Node::from_leaf(LeafNode::new(PartialPath(path), Data(data)))
     }
 
     pub fn branch<const N: usize, const M: usize, T, U>(
