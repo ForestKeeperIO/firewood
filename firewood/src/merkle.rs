@@ -174,7 +174,6 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
         parents: &mut [(ObjRef<'a>, u8)],
         insert_path: &[u8],
         n_path: Vec<u8>,
-        n_value: Option<Data>,
         val: Vec<u8>,
         deleted: &mut Vec<DiskAddress>,
     ) -> Result<Option<(ObjRef<'a>, Vec<u8>)>, MerkleError> {
@@ -229,94 +228,93 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
             self.put_node(new_branch)?.as_ptr()
         } else {
             // paths do not diverge
-            let (leaf_address, prefix, idx, value) =
-                match (insert_path.len().cmp(&n_path.len()), n_value) {
-                    // no node-value means this is an extension node and we can therefore continue walking the tree
-                    (Ordering::Greater, None) => return Ok(Some((node_to_split, val))),
+            let (node_address, prefix, idx, value) = match insert_path.len().cmp(&n_path.len()) {
+                // if the paths are equal, we overwrite the data
+                Ordering::Equal => {
+                    let mut result = Ok(None);
 
-                    // if the paths are equal, we overwrite the data
-                    (Ordering::Equal, _) => {
-                        let mut result = Ok(None);
+                    write_node!(
+                        self,
+                        node_to_split,
+                        |u| {
+                            match &mut u.inner {
+                                NodeType::Leaf(u) => u.data = Data(val),
+                                NodeType::Extension(u) => {
+                                    let write_result =
+                                        self.get_node(u.chd()).and_then(|mut b_ref| {
+                                            b_ref
+                                                .write(|b| {
+                                                    let branch = b.inner.as_branch_mut().unwrap();
+                                                    branch.value = Some(Data(val));
 
-                        write_node!(
-                            self,
-                            node_to_split,
-                            |u| {
-                                match &mut u.inner {
-                                    NodeType::Leaf(u) => u.data = Data(val),
-                                    NodeType::Extension(u) => {
-                                        let write_result =
-                                            self.get_node(u.chd()).and_then(|mut b_ref| {
-                                                b_ref
-                                                    .write(|b| {
-                                                        let branch =
-                                                            b.inner.as_branch_mut().unwrap();
-                                                        branch.value = Some(Data(val));
+                                                    b.rehash()
+                                                })
+                                                // if writing fails, delete the child?
+                                                .or_else(|_| {
+                                                    let node = self.put_node(b_ref.clone())?;
 
-                                                        b.rehash()
-                                                    })
-                                                    // if writing fails, delete the child?
-                                                    .or_else(|_| {
-                                                        let node = self.put_node(b_ref.clone())?;
+                                                    let child = u.chd_mut();
+                                                    *child = node.as_ptr();
 
-                                                        let child = u.chd_mut();
-                                                        *child = node.as_ptr();
+                                                    deleted.push(b_ref.as_ptr());
 
-                                                        deleted.push(b_ref.as_ptr());
+                                                    Ok(())
+                                                })
+                                        });
 
-                                                        Ok(())
-                                                    })
-                                            });
-
-                                        if let Err(e) = write_result {
-                                            result = Err(e);
-                                        }
-                                    }
-                                    NodeType::Branch(u) => {
-                                        u.value = Some(Data(val));
+                                    if let Err(e) = write_result {
+                                        result = Err(e);
                                     }
                                 }
-
-                                u.rehash();
-                            },
-                            parents,
-                            deleted
-                        );
-
-                        return result;
-                    }
-
-                    // if the node-path is greater than the insert path
-                    (Ordering::Less, _) => {
-                        // key path is a prefix of the path to u
-                        node_to_split
-                            .write(|u| {
-                                // TODO: handle unwraps better
-                                let path = u.inner.path_mut();
-                                *path = PartialPath(n_path[insert_path.len() + 1..].to_vec());
-
-                                u.rehash();
-                            })
-                            .unwrap();
-
-                        let leaf_address = match &node_to_split.inner {
-                            // TODO: handle BranchNode case
-                            NodeType::Extension(u) if u.path.len() == 0 => {
-                                deleted.push(node_to_split_address);
-                                u.chd()
+                                NodeType::Branch(u) => {
+                                    u.value = Some(Data(val));
+                                }
                             }
-                            _ => node_to_split_address,
-                        };
 
-                        (
-                            leaf_address,
-                            insert_path,
-                            n_path[insert_path.len()] as usize,
-                            Data(val).into(),
-                        )
+                            u.rehash();
+                        },
+                        parents,
+                        deleted
+                    );
+
+                    return result;
+                }
+
+                // if the node-path is greater than the insert path
+                Ordering::Less => {
+                    // key path is a prefix of the path to u
+                    node_to_split
+                        .write(|u| {
+                            // TODO: handle unwraps better
+                            let path = u.inner.path_mut();
+                            *path = PartialPath(n_path[insert_path.len() + 1..].to_vec());
+
+                            u.rehash();
+                        })
+                        .unwrap();
+
+                    let address = match &node_to_split.inner {
+                        // TODO: handle BranchNode case
+                        NodeType::Extension(u) if u.path.len() == 0 => {
+                            deleted.push(node_to_split_address);
+                            u.chd()
+                        }
+                        _ => node_to_split_address,
+                    };
+
+                    (
+                        address,
+                        insert_path,
+                        n_path[insert_path.len()] as usize,
+                        Data(val).into(),
+                    )
+                }
+
+                Ordering::Greater => match &node_to_split.inner {
+                    NodeType::Branch(_) | NodeType::Extension(_) => {
+                        return Ok(Some((node_to_split, val)));
                     }
-                    // insert path is greather than the path of the leaf
-                    (Ordering::Greater, Some(n_value)) => {
+                    NodeType::Leaf(n) => {
                         let leaf = Node::from_leaf(LeafNode::new(
                             PartialPath(insert_path[n_path.len() + 1..].to_vec()),
                             Data(val),
@@ -330,15 +328,16 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                             leaf_address,
                             n_path.as_slice(),
                             insert_path[n_path.len()] as usize,
-                            n_value.into(),
+                            n.data.clone().into(),
                         )
                     }
-                };
+                },
+            };
 
             // [parent] (-> [ExtNode]) -> [branch with v] -> [Leaf]
             let mut children = [None; BranchNode::MAX_CHILDREN];
 
-            children[idx] = leaf_address.into();
+            children[idx] = node_address.into();
 
             self.put_node(Node::from_branch(BranchNode {
                 path: PartialPath(prefix.to_vec()),
@@ -410,18 +409,9 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                     // we collided with another key; make a copy
                     // of the stored key to pass into split
                     let n_path = n.path.to_vec();
-                    let n_value = Some(n.data.clone());
                     let rem_path = once(current_nibble).chain(key_nibbles).collect::<Vec<_>>();
 
-                    self.split(
-                        node,
-                        &mut parents,
-                        &rem_path,
-                        n_path,
-                        n_value,
-                        val,
-                        &mut deleted,
-                    )?;
+                    self.split(node, &mut parents, &rem_path, n_path, val, &mut deleted)?;
 
                     break None;
                 }
@@ -457,18 +447,11 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                         .chain(key_nibbles.clone())
                         .collect::<Vec<_>>();
                     let n_path_len = n_path.len();
-                    let n_value = n.value.clone();
 
                     // TODO: don't always call split if the paths match (avoids an allocation)
-                    if let Some((mut node, v)) = self.split(
-                        node,
-                        &mut parents,
-                        &rem_path,
-                        n_path,
-                        n_value,
-                        val,
-                        &mut deleted,
-                    )? {
+                    if let Some((mut node, v)) =
+                        self.split(node, &mut parents, &rem_path, n_path, val, &mut deleted)?
+                    {
                         (0..n_path_len).for_each(|_| {
                             key_nibbles.next();
                         });
@@ -515,15 +498,9 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                         .collect::<Vec<_>>();
                     let n_path_len = n_path.len();
 
-                    if let Some((node, v)) = self.split(
-                        node,
-                        &mut parents,
-                        &rem_path,
-                        n_path,
-                        None,
-                        val,
-                        &mut deleted,
-                    )? {
+                    if let Some((node, v)) =
+                        self.split(node, &mut parents, &rem_path, n_path, val, &mut deleted)?
+                    {
                         (0..n_path_len).skip(1).for_each(|_| {
                             key_nibbles.next();
                         });
