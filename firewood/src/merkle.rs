@@ -411,7 +411,7 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                         .chain(key_nibbles.clone())
                         .collect::<Vec<_>>();
 
-                    let overlap = dbg!(Overlap::from(&n.path, &key_remainder));
+                    let overlap = Overlap::from(&n.path, &key_remainder);
 
                     match (overlap.unique_a.len(), overlap.unique_b.len()) {
                         // same node, overwrite the data
@@ -501,18 +501,16 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                             let new_branch_path = overlap.shared.to_vec();
 
                             node.write(move |old_leaf| {
-                                dbg!(&old_leaf.inner);
                                 *old_leaf.inner.path_mut() = PartialPath(old_leaf_path.to_vec());
                                 old_leaf.rehash();
-                                dbg!(&old_leaf.inner);
                             })?;
 
-                            let new_leaf = Node::from_leaf(dbg!(LeafNode::new(
+                            let new_leaf = Node::from_leaf(LeafNode::new(
                                 PartialPath(new_leaf_path),
                                 Data(val),
-                            )));
+                            ));
 
-                            let old_leaf = dbg!(node.as_ptr());
+                            let old_leaf = node.as_ptr();
 
                             let new_leaf = self.put_node(new_leaf)?.as_ptr();
 
@@ -526,8 +524,8 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                             new_branch.children[old_leaf_index as usize] = Some(old_leaf);
                             new_branch.children[new_leaf_index as usize] = Some(new_leaf);
 
-                            let node = Node::from_branch(dbg!(new_branch));
-                            let node = dbg!(self.put_node(node)?.as_ptr());
+                            let node = Node::from_branch(new_branch);
+                            let node = self.put_node(node)?.as_ptr();
 
                             set_parent(node, &mut parents);
                         }
@@ -562,22 +560,19 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                 }
 
                 NodeType::Branch(n) => {
-                    dbg!(&n);
                     // TODO: avoid extra allocation
                     let key_remainder = once(next_nibble)
                         .chain(key_nibbles.clone())
                         .collect::<Vec<_>>();
 
-                    let overlap = dbg!(Overlap::from(&n.path, &key_remainder));
+                    let overlap = Overlap::from(&n.path, &key_remainder);
 
                     match (overlap.unique_a.len(), overlap.unique_b.len()) {
                         // same node, overwrite the data
                         (0, 0) => {
                             node.write(|node| {
-                                dbg!(&node.inner);
                                 *node.inner.data_mut() = Data(val);
                                 node.rehash();
-                                dbg!(&node.inner);
                             })?;
 
                             break None;
@@ -591,7 +586,7 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                             };
 
                             (0..overlap.shared.len()).for_each(|_| {
-                                dbg!(key_nibbles.next());
+                                key_nibbles.next();
                             });
 
                             next_nibble = new_leaf_index;
@@ -671,12 +666,12 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                                 old_branch.rehash();
                             })?;
 
-                            let new_leaf = Node::from_leaf(dbg!(LeafNode::new(
+                            let new_leaf = Node::from_leaf(LeafNode::new(
                                 PartialPath(new_leaf_path),
                                 Data(val),
-                            )));
+                            ));
 
-                            let old_branch = dbg!(node.as_ptr());
+                            let old_branch = node.as_ptr();
 
                             let new_leaf = self.put_node(new_leaf)?.as_ptr();
 
@@ -690,8 +685,8 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                             new_branch.children[old_branch_index as usize] = Some(old_branch);
                             new_branch.children[new_leaf_index as usize] = Some(new_leaf);
 
-                            let node = Node::from_branch(dbg!(new_branch));
-                            let node = dbg!(self.put_node(node)?.as_ptr());
+                            let node = Node::from_branch(new_branch);
+                            let node = self.put_node(node)?.as_ptr();
 
                             set_parent(node, &mut parents);
 
@@ -729,9 +724,8 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
             };
 
             // push another parent, and follow the next pointer
-            parents.push((node_ref, dbg!(next_nibble)));
+            parents.push((node_ref, next_nibble));
             node = self.get_node(next_node_ptr)?;
-            dbg!(&node.inner);
         };
 
         if let Some((mut node, val)) = next_node_and_val {
@@ -1191,7 +1185,7 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
         node_ref: ObjRef<'a>,
         key: K,
     ) -> Result<Option<ObjRef<'a>>, MerkleError> {
-        self.get_node_by_key_with_callback(node_ref, key, |_, _| {})
+        self.get_node_by_key_with_callbacks(node_ref, key, |_, _| {}, |_, _| {})
     }
 
     fn get_node_and_parents_by_key<'a, K: AsRef<[u8]>>(
@@ -1200,9 +1194,14 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
         key: K,
     ) -> Result<(Option<ObjRef<'a>>, ParentRefs<'a>), MerkleError> {
         let mut parents = Vec::new();
-        let node_ref = self.get_node_by_key_with_callback(node_ref, key, |node_ref, nib| {
-            parents.push((node_ref, nib));
-        })?;
+        let node_ref = self.get_node_by_key_with_callbacks(
+            node_ref,
+            key,
+            |node_ref, nib| {
+                parents.push((node_ref, nib));
+            },
+            |_, _| {},
+        )?;
 
         Ok((node_ref, parents))
     }
@@ -1213,18 +1212,24 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
         key: K,
     ) -> Result<(Option<ObjRef<'a>>, ParentAddresses), MerkleError> {
         let mut parents = Vec::new();
-        let node_ref = self.get_node_by_key_with_callback(node_ref, key, |node_ref, nib| {
-            parents.push((node_ref.into_ptr(), nib));
-        })?;
+        let node_ref = self.get_node_by_key_with_callbacks(
+            node_ref,
+            key,
+            |node_ref, nib| {
+                parents.push((node_ref.into_ptr(), nib));
+            },
+            |_, _| {},
+        )?;
 
         Ok((node_ref, parents))
     }
 
-    fn get_node_by_key_with_callback<'a, K: AsRef<[u8]>>(
+    fn get_node_by_key_with_callbacks<'a, K: AsRef<[u8]>>(
         &'a self,
         mut node_ref: ObjRef<'a>,
         key: K,
-        mut loop_callback: impl FnMut(ObjRef<'a>, u8),
+        mut end_loop_callback: impl FnMut(ObjRef<'a>, u8),
+        mut start_loop_callback: impl FnMut(DiskAddress, u8),
     ) -> Result<Option<ObjRef<'a>>, MerkleError> {
         let mut key_nibbles = Nibbles::<1>::new(key.as_ref()).into_iter();
 
@@ -1232,6 +1237,8 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
             let Some(nib) = key_nibbles.next() else {
                 break;
             };
+
+            start_loop_callback(node_ref.as_ptr(), nib);
 
             let next_ptr = match &node_ref.inner {
                 NodeType::Branch(n) if n.path.len() == 0 => match n.children[nib as usize] {
@@ -1290,7 +1297,7 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                 }
             };
 
-            loop_callback(node_ref, nib);
+            end_loop_callback(node_ref, nib);
 
             node_ref = self.get_node(next_ptr)?;
         }
@@ -1345,7 +1352,7 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
 
         let mut nodes = Vec::new();
 
-        let node = self.get_node_by_key_with_callback(root_node, key, {
+        let node = self.get_node_by_key_with_callbacks(root_node, key, |_, _| {}, {
             let (mut skip_root, nodes) = (true, &mut nodes);
 
             move |node, _| {
@@ -1358,12 +1365,12 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
         })?;
 
         if let Some(node) = node {
-            nodes.push(node);
+            nodes.push(node.as_ptr());
         }
 
         // Get the hashes of the nodes.
         for node in nodes {
-            // let node = self.get_node(node)?;
+            let node = self.get_node(node)?;
             let encoded = <&[u8]>::clone(&node.get_encoded::<S>(self.store.as_ref()));
             let hash: [u8; TRIE_HASH_LEN] = sha3::Keccak256::digest(encoded).into();
             proofs.insert(hash, encoded.to_vec());
@@ -1759,12 +1766,11 @@ fn set_parent(new_chd: DiskAddress, parents: &mut [(ObjRef, u8)]) {
     let (p_ref, idx) = parents.last_mut().unwrap();
     p_ref
         .write(|p| {
-            match dbg!(&mut p.inner) {
+            match &mut p.inner {
                 NodeType::Branch(pp) => pp.children[*idx as usize] = Some(new_chd),
                 NodeType::Extension(pp) => *pp.chd_mut() = new_chd,
                 _ => unreachable!(),
             }
-            dbg!(&p.inner);
             p.rehash();
         })
         .unwrap();
@@ -2436,9 +2442,7 @@ mod tests {
         let root = merkle.init_root().unwrap();
 
         merkle.insert(&key, val.clone(), root).unwrap();
-        dbg!(1);
         merkle.insert(&key_2, val_2.clone(), root).unwrap();
-        dbg!(2);
 
         assert_eq!(
             merkle.get(&key, root).unwrap().as_deref(),

@@ -88,7 +88,10 @@ impl<S: ShaleStore<Node> + Send + Sync> MerkleSetup<S> {
         String::from_utf8(s).map_err(|_err| DataStoreError::UTF8Error)
     }
 
-    pub fn prove<K: AsRef<[u8]>>(&self, key: K) -> Result<Proof<Vec<u8>>, DataStoreError> {
+    pub fn prove<K: AsRef<[u8]> + std::fmt::Debug>(
+        &self,
+        key: K,
+    ) -> Result<Proof<Vec<u8>>, DataStoreError> {
         self.merkle
             .prove(key, self.root)
             .map_err(|_err| DataStoreError::ProofError)

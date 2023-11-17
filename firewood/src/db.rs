@@ -363,7 +363,10 @@ impl<S: ShaleStore<Node> + Send + Sync> DbRev<S> {
             .map_err(DbError::Merkle)
     }
 
-    pub fn prove<K: AsRef<[u8]>>(&self, key: K) -> Result<Proof<Vec<u8>>, MerkleError> {
+    pub fn prove<K: AsRef<[u8]> + std::fmt::Debug>(
+        &self,
+        key: K,
+    ) -> Result<Proof<Vec<u8>>, MerkleError> {
         self.merkle.prove::<K>(key, self.header.kv_root)
     }
 
