@@ -394,7 +394,7 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
         // walk down the merkle tree starting from next_node, currently the root
         // return None if the value is inserted
         let next_node_and_val = loop {
-            let Some(current_nibble) = key_nibbles.next() else {
+            let Some(mut next_nibble) = key_nibbles.next() else {
                 break Some((node, val));
             };
 
@@ -403,18 +403,138 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                 // to another node, we walk down that. Otherwise, we can store our
                 // value as a leaf and we're done
                 NodeType::Leaf(n) => {
-                    // we collided with another key; make a copy
-                    // of the stored key to pass into split
-                    let n_path = n.path.to_vec();
-                    let rem_path = once(current_nibble).chain(key_nibbles).collect::<Vec<_>>();
+                    // TODO: avoid extra allocation
+                    let key_remainder = once(next_nibble)
+                        .chain(key_nibbles.clone())
+                        .collect::<Vec<_>>();
 
-                    self.split(node, &mut parents, &rem_path, n_path, val, &mut deleted)?;
+                    let overlap = dbg!(Overlap::from(&n.path, &key_remainder));
+
+                    match (overlap.unique_a.len(), overlap.unique_b.len()) {
+                        // same node, overwrite the data
+                        (0, 0) => {
+                            node.write(|node| {
+                                *node.inner.data_mut() = Data(val);
+                                node.rehash();
+                            })?;
+                        }
+
+                        // new node is a child of the old node
+                        (0, _) => {
+                            let (new_leaf_index, new_leaf_path) = {
+                                let (index, path) = overlap.unique_b.split_at(1);
+                                (index[0], path.to_vec())
+                            };
+
+                            let new_leaf = Node::from_leaf(LeafNode::new(
+                                PartialPath(new_leaf_path),
+                                Data(val),
+                            ));
+
+                            let new_leaf = self.put_node(new_leaf)?.as_ptr();
+
+                            let mut children = [None; BranchNode::MAX_CHILDREN];
+                            children[new_leaf_index as usize] = Some(new_leaf);
+
+                            let new_branch = BranchNode {
+                                path: PartialPath(overlap.shared.to_vec()),
+                                children,
+                                value: n.data.clone().into(),
+                                children_encoded: Default::default(),
+                            };
+
+                            let new_branch = Node::from_branch(new_branch);
+
+                            let new_branch = self.put_node(new_branch)?.as_ptr();
+
+                            set_parent(new_branch, &mut parents);
+
+                            deleted.push(node.as_ptr());
+                        }
+
+                        // old node is a child of the new node
+                        (_, 0) => {
+                            let (old_leaf_index, old_leaf_path) = {
+                                let (index, path) = overlap.unique_a.split_at(1);
+                                (index[0], path.to_vec())
+                            };
+
+                            let new_branch_path = overlap.shared.to_vec();
+
+                            node.write(move |old_leaf| {
+                                *old_leaf.inner.path_mut() = PartialPath(old_leaf_path.to_vec());
+                                old_leaf.rehash();
+                            })?;
+
+                            let old_leaf = node.as_ptr();
+
+                            let mut new_branch = BranchNode {
+                                path: PartialPath(new_branch_path),
+                                children: [None; BranchNode::MAX_CHILDREN],
+                                value: Some(val.into()),
+                                children_encoded: Default::default(),
+                            };
+
+                            new_branch.children[old_leaf_index as usize] = Some(old_leaf);
+
+                            let node = Node::from_branch(new_branch);
+                            let node = self.put_node(node)?.as_ptr();
+
+                            set_parent(node, &mut parents);
+                        }
+
+                        // nodes are siblings
+                        _ => {
+                            let (old_leaf_index, old_leaf_path) = {
+                                let (index, path) = overlap.unique_a.split_at(1);
+                                (index[0], path.to_vec())
+                            };
+
+                            let (new_leaf_index, new_leaf_path) = {
+                                let (index, path) = overlap.unique_b.split_at(1);
+                                (index[0], path.to_vec())
+                            };
+
+                            let new_branch_path = overlap.shared.to_vec();
+
+                            node.write(move |old_leaf| {
+                                dbg!(&old_leaf.inner);
+                                *old_leaf.inner.path_mut() = PartialPath(old_leaf_path.to_vec());
+                                old_leaf.rehash();
+                                dbg!(&old_leaf.inner);
+                            })?;
+
+                            let new_leaf = Node::from_leaf(dbg!(LeafNode::new(
+                                PartialPath(new_leaf_path),
+                                Data(val),
+                            )));
+
+                            let old_leaf = dbg!(node.as_ptr());
+
+                            let new_leaf = self.put_node(new_leaf)?.as_ptr();
+
+                            let mut new_branch = BranchNode {
+                                path: PartialPath(new_branch_path),
+                                children: [None; BranchNode::MAX_CHILDREN],
+                                value: None,
+                                children_encoded: Default::default(),
+                            };
+
+                            new_branch.children[old_leaf_index as usize] = Some(old_leaf);
+                            new_branch.children[new_leaf_index as usize] = Some(new_leaf);
+
+                            let node = Node::from_branch(dbg!(new_branch));
+                            let node = dbg!(self.put_node(node)?.as_ptr());
+
+                            set_parent(node, &mut parents);
+                        }
+                    }
 
                     break None;
                 }
 
                 NodeType::Branch(n) if n.path.len() == 0 => {
-                    match n.children[current_nibble as usize] {
+                    match n.children[next_nibble as usize] {
                         Some(c) => (node, c),
                         None => {
                             // insert the leaf to the empty slot
@@ -428,7 +548,7 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                             // set the current child to point to this leaf
                             node.write(|u| {
                                 let uu = u.inner.as_branch_mut().unwrap();
-                                uu.children[current_nibble as usize] = Some(leaf_ptr);
+                                uu.children[next_nibble as usize] = Some(leaf_ptr);
                                 u.rehash();
                             })
                             .unwrap();
@@ -439,58 +559,148 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                 }
 
                 NodeType::Branch(n) => {
-                    let n_path = n.path.to_vec();
-                    let rem_path = once(current_nibble)
+                    dbg!(&n);
+                    // TODO: avoid extra allocation
+                    let key_remainder = once(next_nibble)
                         .chain(key_nibbles.clone())
                         .collect::<Vec<_>>();
-                    let n_path_len = n_path.len();
 
-                    // TODO: don't always call split if the paths match (avoids an allocation)
-                    if let Some((mut node, v)) =
-                        self.split(node, &mut parents, &rem_path, n_path, val, &mut deleted)?
-                    {
-                        (0..n_path_len).for_each(|_| {
-                            key_nibbles.next();
-                        });
+                    let overlap = dbg!(Overlap::from(&n.path, &key_remainder));
 
-                        val = v;
+                    match (overlap.unique_a.len(), overlap.unique_b.len()) {
+                        // same node, overwrite the data
+                        (0, 0) => {
+                            node.write(|node| {
+                                dbg!(&node.inner);
+                                *node.inner.data_mut() = Data(val);
+                                node.rehash();
+                                dbg!(&node.inner);
+                            })?;
 
-                        let next_nibble = rem_path[n_path_len] as usize;
-                        // we're already in the match-arm that states that this was a branch-node
-                        // TODO: cleaning up the split-logic should fix this awkwardness
-                        let n_ptr = node.inner.as_branch().unwrap().children[next_nibble];
+                            break None;
+                        }
 
-                        match n_ptr {
-                            Some(n_ptr) => (node, n_ptr),
-                            None => {
-                                // insert the leaf to the empty slot
-                                // create a new leaf
-                                let leaf_ptr = self
-                                    .put_node(Node::from_leaf(LeafNode::new(
-                                        PartialPath(key_nibbles.collect()),
+                        // new node is a child of the old node
+                        (0, _) => {
+                            let (new_leaf_index, new_leaf_path) = {
+                                let (index, path) = overlap.unique_b.split_at(1);
+                                (index[0], path)
+                            };
+
+                            (0..overlap.shared.len()).for_each(|_| {
+                                dbg!(key_nibbles.next());
+                            });
+
+                            next_nibble = new_leaf_index;
+
+                            match n.children[next_nibble as usize] {
+                                Some(ptr) => (node, ptr),
+                                None => {
+                                    let new_leaf = Node::from_leaf(LeafNode::new(
+                                        PartialPath(new_leaf_path.to_vec()),
                                         Data(val),
-                                    )))?
-                                    .as_ptr();
-                                // set the current child to point to this leaf
-                                node.write(|u| {
-                                    let uu = u.inner.as_branch_mut().unwrap();
-                                    uu.children[next_nibble] = Some(leaf_ptr);
-                                    u.rehash();
-                                })
-                                .unwrap();
+                                    ));
 
-                                break None;
+                                    let new_leaf = self.put_node(new_leaf)?.as_ptr();
+                                    node.write(|node| {
+                                        let branch = node.inner.as_branch_mut().unwrap();
+                                        branch.children[next_nibble as usize] = Some(new_leaf);
+
+                                        node.rehash();
+                                    })?;
+
+                                    break None;
+                                }
                             }
                         }
-                    } else {
-                        break None;
+
+                        // old node is a child of the new node
+                        (_, 0) => {
+                            let (old_branch_index, old_branch_path) = {
+                                let (index, path) = overlap.unique_a.split_at(1);
+                                (index[0], path.to_vec())
+                            };
+
+                            let new_branch_path = overlap.shared.to_vec();
+
+                            node.write(move |old_branch| {
+                                *old_branch.inner.path_mut() =
+                                    PartialPath(old_branch_path.to_vec());
+                                old_branch.rehash();
+                            })?;
+
+                            let old_branch = node.as_ptr();
+
+                            let mut new_branch = BranchNode {
+                                path: PartialPath(new_branch_path),
+                                children: [None; BranchNode::MAX_CHILDREN],
+                                value: Some(val.into()),
+                                children_encoded: Default::default(),
+                            };
+
+                            new_branch.children[old_branch_index as usize] = Some(old_branch);
+
+                            let node = Node::from_branch(new_branch);
+                            let node = self.put_node(node)?.as_ptr();
+
+                            set_parent(node, &mut parents);
+
+                            break None;
+                        }
+
+                        // nodes are siblings
+                        _ => {
+                            let (old_branch_index, old_branch_path) = {
+                                let (index, path) = overlap.unique_a.split_at(1);
+                                (index[0], path.to_vec())
+                            };
+
+                            let (new_leaf_index, new_leaf_path) = {
+                                let (index, path) = overlap.unique_b.split_at(1);
+                                (index[0], path.to_vec())
+                            };
+
+                            let new_branch_path = overlap.shared.to_vec();
+
+                            node.write(move |old_branch| {
+                                *old_branch.inner.path_mut() =
+                                    PartialPath(old_branch_path.to_vec());
+                                old_branch.rehash();
+                            })?;
+
+                            let new_leaf = Node::from_leaf(dbg!(LeafNode::new(
+                                PartialPath(new_leaf_path),
+                                Data(val),
+                            )));
+
+                            let old_branch = dbg!(node.as_ptr());
+
+                            let new_leaf = self.put_node(new_leaf)?.as_ptr();
+
+                            let mut new_branch = BranchNode {
+                                path: PartialPath(new_branch_path),
+                                children: [None; BranchNode::MAX_CHILDREN],
+                                value: None,
+                                children_encoded: Default::default(),
+                            };
+
+                            new_branch.children[old_branch_index as usize] = Some(old_branch);
+                            new_branch.children[new_leaf_index as usize] = Some(new_leaf);
+
+                            let node = Node::from_branch(dbg!(new_branch));
+                            let node = dbg!(self.put_node(node)?.as_ptr());
+
+                            set_parent(node, &mut parents);
+
+                            break None;
+                        }
                     }
                 }
 
                 NodeType::Extension(n) => {
                     let n_path = n.path.to_vec();
                     let n_ptr = n.chd();
-                    let rem_path = once(current_nibble)
+                    let rem_path = once(next_nibble)
                         .chain(key_nibbles.clone())
                         .collect::<Vec<_>>();
                     let n_path_len = n_path.len();
@@ -516,8 +726,9 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
             };
 
             // push another parent, and follow the next pointer
-            parents.push((node_ref, current_nibble));
+            parents.push((node_ref, dbg!(next_nibble)));
             node = self.get_node(next_node_ptr)?;
+            dbg!(&node.inner);
         };
 
         if let Some((mut node, val)) = next_node_and_val {
@@ -1182,11 +1393,12 @@ fn set_parent(new_chd: DiskAddress, parents: &mut [(ObjRef, u8)]) {
     let (p_ref, idx) = parents.last_mut().unwrap();
     p_ref
         .write(|p| {
-            match &mut p.inner {
+            match dbg!(&mut p.inner) {
                 NodeType::Branch(pp) => pp.children[*idx as usize] = Some(new_chd),
                 NodeType::Extension(pp) => *pp.chd_mut() = new_chd,
                 _ => unreachable!(),
             }
+            dbg!(&p.inner);
             p.rehash();
         })
         .unwrap();
@@ -1268,12 +1480,42 @@ pub fn from_nibbles(nibbles: &[u8]) -> impl Iterator<Item = u8> + '_ {
     nibbles.chunks_exact(2).map(|p| (p[0] << 4) | p[1])
 }
 
+#[derive(Debug)]
+struct Overlap<'a, T> {
+    shared: &'a [T],
+    unique_a: &'a [T],
+    unique_b: &'a [T],
+}
+
+impl<'a, T: PartialEq> Overlap<'a, T> {
+    fn from(a: &'a [T], b: &'a [T]) -> Self {
+        let mut split_index = 0;
+
+        for i in 0..std::cmp::min(a.len(), b.len()) {
+            if a[i] != b[i] {
+                break;
+            }
+
+            split_index += 1;
+        }
+
+        let (shared, unique_a) = a.split_at(split_index);
+        let (_, unique_b) = b.split_at(split_index);
+
+        Self {
+            shared,
+            unique_a,
+            unique_b,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use node::tests::{extension, leaf};
     use shale::{cached::DynamicMem, compact::CompactSpace, CachedStore};
-    use std::sync::Arc;
+    use std::{sync::Arc, vec};
     use test_case::test_case;
 
     #[test_case(vec![0x12, 0x34, 0x56], vec![0x1, 0x2, 0x3, 0x4, 0x5, 0x6])]
@@ -1405,6 +1647,60 @@ mod tests {
     }
 
     #[test]
+    fn long_insert_and_retrieve_multiple() {
+        let key_val: Vec<(&'static [u8], _)> = vec![
+            (
+                &[0, 0, 0, 1, 0, 101, 151, 236],
+                [16, 15, 159, 195, 34, 101, 227, 73],
+            ),
+            (
+                &[0, 0, 1, 107, 198, 92, 205],
+                [26, 147, 21, 200, 138, 106, 137, 218],
+            ),
+            (&[0, 1, 0, 1, 0, 56], [194, 147, 168, 193, 19, 226, 51, 204]),
+            (&[1, 90], [101, 38, 25, 65, 181, 79, 88, 223]),
+            (
+                &[1, 1, 1, 0, 0, 0, 1, 59],
+                [105, 173, 182, 126, 67, 166, 166, 196],
+            ),
+            (
+                &[0, 1, 0, 0, 1, 1, 55, 33, 38, 194],
+                [90, 140, 160, 53, 230, 100, 237, 236],
+            ),
+            (
+                &[1, 1, 0, 1, 249, 46, 69],
+                [16, 104, 134, 6, 57, 46, 200, 35],
+            ),
+            (
+                &[1, 1, 0, 1, 0, 0, 1, 33, 163],
+                [95, 97, 187, 124, 198, 28, 75, 226],
+            ),
+            (
+                &[1, 1, 0, 1, 0, 57, 156],
+                [184, 18, 69, 29, 96, 252, 188, 58],
+            ),
+            (&[1, 0, 1, 1, 0, 218], [155, 38, 43, 54, 93, 134, 73, 209]),
+        ];
+
+        let mut merkle = create_test_merkle();
+        let root = merkle.init_root().unwrap();
+
+        for (key, val) in &key_val {
+            merkle.insert(key, val.to_vec(), root).unwrap();
+
+            let fetched_val = merkle.get(key, root).unwrap();
+
+            assert_eq!(fetched_val.as_deref(), val.as_slice().into());
+        }
+
+        for (key, val) in key_val {
+            let fetched_val = merkle.get(key, root).unwrap();
+
+            assert_eq!(fetched_val.as_deref(), val.as_slice().into());
+        }
+    }
+
+    #[test]
     fn remove_one() {
         let key = b"hello";
         let val = b"world";
@@ -1487,6 +1783,182 @@ mod tests {
             let val = val.to_vec();
             merkle.insert(key, val, root).unwrap()
         }
+    }
+
+    #[test]
+    fn overwrite_leaf() {
+        let key = vec![0x00];
+        let val = vec![1];
+        let overwrite = vec![2];
+
+        let mut merkle = create_test_merkle();
+        let root = merkle.init_root().unwrap();
+
+        merkle.insert(&key, val.clone(), root).unwrap();
+
+        assert_eq!(
+            merkle.get(&key, root).unwrap().as_deref(),
+            Some(val.as_slice())
+        );
+
+        merkle.insert(&key, overwrite.clone(), root).unwrap();
+
+        assert_eq!(
+            merkle.get(&key, root).unwrap().as_deref(),
+            Some(overwrite.as_slice())
+        );
+    }
+
+    #[test]
+    fn new_leaf_is_a_child_of_the_old_leaf() {
+        let key = vec![0xff];
+        let val = vec![1];
+        let key_2 = vec![0xff, 0x00];
+        let val_2 = vec![2];
+
+        let mut merkle = create_test_merkle();
+        let root = merkle.init_root().unwrap();
+
+        merkle.insert(&key, val.clone(), root).unwrap();
+        merkle.insert(&key_2, val_2.clone(), root).unwrap();
+
+        assert_eq!(
+            merkle.get(&key, root).unwrap().as_deref(),
+            Some(val.as_slice())
+        );
+
+        assert_eq!(
+            merkle.get(&key_2, root).unwrap().as_deref(),
+            Some(val_2.as_slice())
+        );
+    }
+
+    #[test]
+    fn old_leaf_is_a_child_of_the_new_leaf() {
+        let key = vec![0xff, 0x00];
+        let val = vec![1];
+        let key_2 = vec![0xff];
+        let val_2 = vec![2];
+
+        let mut merkle = create_test_merkle();
+        let root = merkle.init_root().unwrap();
+
+        merkle.insert(&key, val.clone(), root).unwrap();
+        merkle.insert(&key_2, val_2.clone(), root).unwrap();
+
+        assert_eq!(
+            merkle.get(&key, root).unwrap().as_deref(),
+            Some(val.as_slice())
+        );
+
+        assert_eq!(
+            merkle.get(&key_2, root).unwrap().as_deref(),
+            Some(val_2.as_slice())
+        );
+    }
+
+    #[test]
+    fn new_leaf_is_sibling_of_old_leaf() {
+        let key = vec![0xff];
+        let val = vec![1];
+        let key_2 = vec![0xff, 0x00];
+        let val_2 = vec![2];
+        let key_3 = vec![0xff, 0x0f];
+        let val_3 = vec![3];
+
+        let mut merkle = create_test_merkle();
+        let root = merkle.init_root().unwrap();
+
+        merkle.insert(&key, val.clone(), root).unwrap();
+        merkle.insert(&key_2, val_2.clone(), root).unwrap();
+        merkle.insert(&key_3, val_3.clone(), root).unwrap();
+
+        assert_eq!(
+            merkle.get(&key, root).unwrap().as_deref(),
+            Some(val.as_slice())
+        );
+
+        assert_eq!(
+            merkle.get(&key_2, root).unwrap().as_deref(),
+            Some(val_2.as_slice())
+        );
+
+        assert_eq!(
+            merkle.get(&key_3, root).unwrap().as_deref(),
+            Some(val_3.as_slice())
+        );
+    }
+
+    #[test]
+    fn old_branch_is_a_child_of_new_branch() {
+        let key = vec![0xff, 0xf0];
+        let val = vec![1];
+        let key_2 = vec![0xff, 0xf0, 0x00];
+        let val_2 = vec![2];
+        let key_3 = vec![0xff];
+        let val_3 = vec![3];
+
+        let mut merkle = create_test_merkle();
+        let root = merkle.init_root().unwrap();
+
+        merkle.insert(&key, val.clone(), root).unwrap();
+        merkle.insert(&key_2, val_2.clone(), root).unwrap();
+        merkle.insert(&key_3, val_3.clone(), root).unwrap();
+
+        assert_eq!(
+            merkle.get(&key, root).unwrap().as_deref(),
+            Some(val.as_slice())
+        );
+
+        assert_eq!(
+            merkle.get(&key_2, root).unwrap().as_deref(),
+            Some(val_2.as_slice())
+        );
+
+        assert_eq!(
+            merkle.get(&key_3, root).unwrap().as_deref(),
+            Some(val_3.as_slice())
+        );
+    }
+
+    #[test]
+    fn overlapping_branch_insert() {
+        let key = vec![0xff];
+        let val = vec![1];
+        let key_2 = vec![0xff, 0x00];
+        let val_2 = vec![2];
+
+        let overwrite = vec![3];
+
+        let mut merkle = create_test_merkle();
+        let root = merkle.init_root().unwrap();
+
+        merkle.insert(&key, val.clone(), root).unwrap();
+        dbg!(1);
+        merkle.insert(&key_2, val_2.clone(), root).unwrap();
+        dbg!(2);
+
+        assert_eq!(
+            merkle.get(&key, root).unwrap().as_deref(),
+            Some(val.as_slice())
+        );
+
+        assert_eq!(
+            merkle.get(&key_2, root).unwrap().as_deref(),
+            Some(val_2.as_slice())
+        );
+
+        merkle.insert(&key, overwrite.clone(), root).unwrap();
+
+        assert_eq!(
+            merkle.get(&key, root).unwrap().as_deref(),
+            Some(overwrite.as_slice())
+        );
+
+        assert_eq!(
+            merkle.get(&key_2, root).unwrap().as_deref(),
+            Some(val_2.as_slice())
+        );
     }
 
     #[test]

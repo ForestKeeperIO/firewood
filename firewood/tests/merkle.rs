@@ -15,15 +15,27 @@ use std::collections::HashMap;
 
 type Store = CompactSpace<Node, DynamicMem>;
 
-fn merkle_build_test<K: AsRef<[u8]> + std::cmp::Ord + Clone, V: AsRef<[u8]> + Clone>(
+fn merkle_build_test<
+    K: AsRef<[u8]> + std::cmp::Ord + Clone + std::fmt::Debug,
+    V: AsRef<[u8]> + Clone,
+>(
     items: Vec<(K, V)>,
     meta_size: u64,
     compact_size: u64,
 ) -> Result<MerkleSetup<Store>, DataStoreError> {
     let mut merkle = new_merkle(meta_size, compact_size);
-
+    let mut j = 0;
     for (k, v) in items.iter() {
+        dbg!(j);
+
+        if j == 8 {
+            dbg!("this one breaks");
+        }
+
+        dbg!(&k);
         merkle.insert(k, v.as_ref().to_vec())?;
+
+        j += 1;
     }
 
     Ok(merkle)
@@ -67,12 +79,19 @@ fn test_root_hash_fuzz_insertions() -> Result<(), DataStoreError> {
         key
     };
 
-    for _ in 0..10 {
+    for i in 0..10 {
+        dbg!(i);
         let mut items = Vec::new();
         for _ in 0..10 {
             let val: Vec<u8> = (0..8).map(|_| rng.borrow_mut().gen()).collect();
             items.push((keygen(), val));
         }
+
+        if i == 6 {
+            eprintln!("{:?}", &items);
+            dbg!("this one breaks");
+        }
+
         merkle_build_test(items, 0x1000000, 0x1000000)?;
     }
 
