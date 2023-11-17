@@ -551,7 +551,7 @@ fn locate_subproof(
 
             Ok((sub_proof.into(), key_nibbles))
         }
-        NodeType::Branch(_) if key_nibbles.size_hint().0 == 0 => Err(ProofError::NoSuchNode),
+        // NodeType::Branch(_) if key_nibbles.size_hint().0 == 0 => Err(ProofError::NoSuchNode),
         NodeType::Branch(n) => {
             let partial_path = &n.path.0;
 
