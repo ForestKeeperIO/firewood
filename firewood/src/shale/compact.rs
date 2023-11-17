@@ -10,15 +10,18 @@ use std::io::{Cursor, Write};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, RwLock};
 
+type PayLoadSize = u64;
+
 #[derive(Debug)]
 pub struct CompactHeader {
-    payload_size: u64,
+    payload_size: PayLoadSize,
     is_freed: bool,
     desc_addr: DiskAddress,
 }
 
 impl CompactHeader {
     pub const MSIZE: u64 = 17;
+
     pub fn is_freed(&self) -> bool {
         self.is_freed
     }
@@ -63,11 +66,11 @@ impl Storable for CompactHeader {
 
 #[derive(Debug)]
 struct CompactFooter {
-    payload_size: u64,
+    payload_size: PayLoadSize,
 }
 
 impl CompactFooter {
-    const MSIZE: u64 = 8;
+    const MSIZE: u64 = std::mem::size_of::<PayLoadSize>() as u64;
 }
 
 impl Storable for CompactFooter {
@@ -94,7 +97,7 @@ impl Storable for CompactFooter {
 
 #[derive(Clone, Copy, Debug)]
 struct CompactDescriptor {
-    payload_size: u64,
+    payload_size: PayLoadSize,
     haddr: usize, // disk address of the free space
 }
 
@@ -281,6 +284,13 @@ impl<M: CachedStore> CompactSpaceInner<M> {
         let mut offset = addr - hsize;
         let header_payload_size = {
             let header = self.get_header(DiskAddress::from(offset as usize))?;
+
+            if header.is_freed {
+                dbg!(addr);
+                dbg!(hsize);
+                dbg!(offset);
+            }
+
             assert!(!header.is_freed);
             header.payload_size
         };
@@ -548,7 +558,10 @@ impl<T: Storable + 'static, M: CachedStore + Send + Sync> ShaleStore<T> for Comp
     fn free_item(&mut self, ptr: DiskAddress) -> Result<(), ShaleError> {
         let mut inner = self.inner.write().unwrap();
         self.obj_cache.pop(ptr);
-        inner.free(ptr.unwrap().get() as u64)
+        inner.free(ptr.unwrap().get() as u64).map_err(|err| {
+            dbg!(ptr);
+            err
+        })
     }
 
     fn get_item(&self, ptr: DiskAddress) -> Result<ObjRef<'_, T>, ShaleError> {

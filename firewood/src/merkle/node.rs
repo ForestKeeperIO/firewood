@@ -141,6 +141,14 @@ impl NodeType {
             NodeType::Extension(node) => &mut node.path,
         }
     }
+
+    pub fn data_mut(&mut self) -> &mut Data {
+        match self {
+            NodeType::Branch(u) => u.value.as_mut().unwrap(),
+            NodeType::Leaf(node) => &mut node.data,
+            NodeType::Extension(_) => unreachable!(),
+        }
+    }
 }
 
 #[derive(Debug)]
