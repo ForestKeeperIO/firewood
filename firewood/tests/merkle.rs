@@ -335,6 +335,7 @@ fn test_missing_key_proof() -> Result<(), DataStoreError> {
     let merkle = merkle_build_test(items, 0x10000, 0x10000)?;
     for key in &["a", "j", "l", "z"] {
         let proof = merkle.prove(key)?;
+        dbg!(&proof);
         assert!(!proof.0.is_empty());
         assert!(proof.0.len() == 1);
 
