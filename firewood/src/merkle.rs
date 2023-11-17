@@ -6,6 +6,7 @@ use crate::v2::api;
 use crate::{nibbles::Nibbles, v2::api::Proof};
 use futures::Stream;
 use sha3::Digest;
+use std::marker::PhantomData;
 use std::{
     cmp::Ordering,
     collections::HashMap,
@@ -23,6 +24,8 @@ mod trie_hash;
 pub use node::{BranchNode, Data, ExtNode, LeafNode, Node, NodeType, NBRANCH};
 pub use partial_path::PartialPath;
 pub use trie_hash::{TrieHash, TRIE_HASH_LEN};
+
+use self::node::{BinaryCodec, Bincode, EncodedNode, EncodedNodeType};
 
 type ObjRef<'a> = shale::ObjRef<'a, Node>;
 type ParentRefs<'a> = Vec<(ObjRef<'a>, u8)>;
@@ -111,6 +114,41 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                     .unwrap(),
             )
         })
+    }
+
+    fn get_encoded<T: BinaryCodec>(&self, node: ObjRef) -> Vec<u8> {
+        // phantomdata to decide which BinaryCodec to use
+        // to implement serialize for EncodedNode
+        // check if node cached encoding exist already
+        let encoded = match node.inner() {
+            NodeType::Leaf(n) => EncodedNode::<T> {
+                node: EncodedNodeType::Leaf(n.clone()),
+                phantom: PhantomData,
+            },
+            NodeType::Branch(n) => {
+                let mut children: [Option<Vec<u8>>; NBRANCH] = Default::default();
+                // TODO: add encoding node n.chd_encode();
+                for (pos, chd) in n.chd().iter().enumerate() {
+                    if let Some(chd_addr) = chd {
+                        let node = self.get_node(*chd_addr).unwrap();
+
+                        let chd_encoded = self.get_encoded::<T>(node);
+                        children[pos] = Some(chd_encoded);
+                    }
+                }
+                EncodedNode::<T> {
+                    node: EncodedNodeType::Branch {
+                        children,
+                        value: n.value.clone(),
+                    },
+                    phantom: PhantomData,
+                }
+            }
+
+            NodeType::Extension(_) => todo!(),
+        };
+        let e = Bincode(bincode::DefaultOptions::new());
+        e.serialize(&encoded).unwrap()
     }
 
     pub fn root_hash(&self, root: DiskAddress) -> Result<TrieHash, MerkleError> {
@@ -1565,6 +1603,7 @@ mod tests {
     use super::*;
     use futures::StreamExt;
     use node::tests::{extension, leaf};
+    use serde::de::Expected;
     use shale::{cached::DynamicMem, compact::CompactSpace, CachedStore};
     use std::sync::Arc;
     use test_case::test_case;
@@ -1632,10 +1671,20 @@ mod tests {
 
         let node_ref = merkle.put_node(node).unwrap();
         let encoded = node_ref.get_encoded(merkle.store.as_ref());
+        print!("{:?}", encoded);
         let new_node = Node::from(NodeType::decode(encoded).unwrap());
         let new_node_encoded = new_node.get_encoded(merkle.store.as_ref());
 
         assert_eq!(encoded, new_node_encoded);
+    }
+
+    #[test_case(leaf(vec![1, 2, 3], vec![4, 5]) ; "leaf encoding")]
+    #[test_case(branch(b"value".to_vec(), vec![1, 2, 3].into()) ; "branch with value")]
+    fn encode_new_(node: Node) {
+        let merkle = create_test_merkle();
+        let node_ref = merkle.put_node(node).unwrap();
+        let encoded = merkle.get_encoded::<Bincode>(node_ref);
+        print!("{:?}", encoded);
     }
 
     #[test]
@@ -1643,11 +1692,17 @@ mod tests {
         let key = b"hello";
         let val = b"world";
 
-        let mut merkle = create_test_merkle();
+        let mut merkle: Merkle<CompactSpace<Node, DynamicMem>> = create_test_merkle();
         let root = merkle.init_root().unwrap();
 
         merkle.insert(key, val.to_vec(), root).unwrap();
+        let r = merkle.get_node(root).unwrap();
+        let encoded = merkle.get_encoded::<Bincode>(r);
+        let r2 = merkle.get_node(root).unwrap();
+        let expexted = r2.get_encoded::<CompactSpace<Node, DynamicMem>>(&merkle.store);
 
+        println!("encoded {:?}", encoded);
+        println!("{:?}", expexted);
         let fetched_val = merkle.get(key, root).unwrap();
 
         assert_eq!(fetched_val.as_deref(), val.as_slice().into());

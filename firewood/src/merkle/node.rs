@@ -4,8 +4,10 @@
 use crate::shale::{disk_address::DiskAddress, CachedStore, ShaleError, ShaleStore, Storable};
 use bincode::{Error, Options};
 use enum_as_inner::EnumAsInner;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::ser::SerializeSeq;
+use serde::{de::DeserializeOwned, Deserialize, Serialize, Serializer};
 use sha3::{Digest, Keccak256};
+use std::marker::PhantomData;
 use std::{
     fmt::{self, Debug},
     io::{Cursor, Read, Write},
@@ -62,6 +64,19 @@ pub struct BranchNode {
     pub(super) children: [Option<DiskAddress>; NBRANCH],
     pub(super) value: Option<Data>,
     pub(super) children_encoded: [Option<Vec<u8>>; NBRANCH],
+}
+impl Serialize for BranchNode {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let s = [0];
+        let mut seq = serializer.serialize_seq(Some(s.len()))?;
+        for e in s {
+            seq.serialize_element(&e)?;
+        }
+        seq.end()
+    }
 }
 
 impl Debug for BranchNode {
@@ -216,6 +231,23 @@ impl Debug for LeafNode {
     }
 }
 
+// impl Serialize for LeafNode {
+//     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+//     where
+//         S: Serializer,
+//     {
+//         let s = [
+//             Encoded::Raw(from_nibbles(&self.0.encode(true)).collect()),
+//             Encoded::Raw(self.1.to_vec()),
+//         ];
+//         let mut seq = serializer.serialize_seq(Some(s.len()))?;
+//         for e in s {
+//             seq.serialize_element(&e)?;
+//         }
+//         seq.end()
+//     }
+// }
+
 impl LeafNode {
     fn encode(&self) -> Vec<u8> {
         bincode::DefaultOptions::new()
@@ -248,6 +280,27 @@ pub struct ExtNode {
     pub(crate) child: DiskAddress,
     pub(crate) child_encoded: Option<Vec<u8>>,
 }
+// impl Serialize for ExtNode {
+//     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+//     where
+//         S: Serializer,
+//     {
+//         // let mut list = <[Encoded<Vec<u8>>; 2]>::default();
+//         // list[0] = Encoded::Data(
+//         //     serializer.serialize_seq(&from_nibbles(&self.path.encode(false)).collect::<Vec<_>>())
+//         //         .unwrap(),
+//         // );
+
+//         let mut seq = serializer.serialize_seq(Some(2))?;
+//         let inner = from_nibbles(&self.path.encode(false)).collect::<Vec<_>>();
+//         seq.serialize_element(&inner)?;
+//         // Check if there is already a caclucated encoded value for the child, which
+//         // can happen when manually constructing a trie from proof.
+
+//         seq.serialize_element(&self.child_encoded.as_ref().unwrap())?;
+//         seq.end()
+//     }
+// }
 
 impl Debug for ExtNode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
@@ -261,6 +314,27 @@ impl Debug for ExtNode {
 }
 
 impl ExtNode {
+    // fn child_encoded<S: ShaleStore<Node>>(&mut self, store: &S) {
+    //     if !self.child.is_null() {
+    //         let mut r = store.get_item(self.child).unwrap();
+
+    //         if r.is_encoded_longer_than_hash_len(store) {
+    //             self.child_encoded = Some(
+    //                 bincode::DefaultOptions::new()
+    //                     .serialize(&&(*r.get_root_hash(store))[..])
+    //                     .unwrap(),
+    //             );
+
+    //             if r.lazy_dirty.load(Ordering::Relaxed) {
+    //                 r.write(|_| {}).unwrap();
+    //                 r.lazy_dirty.store(false, Ordering::Relaxed);
+    //             }
+    //         } else {
+    //             self.child_encoded = Some(r.get_encoded(store).to_vec());
+    //         }
+    //     }
+    // }
+
     fn encode<S: ShaleStore<Node>>(&self, store: &S) -> Vec<u8> {
         let mut list = <[Encoded<Vec<u8>>; 2]>::default();
         list[0] = Encoded::Data(
@@ -320,10 +394,13 @@ impl ExtNode {
     }
 }
 
+// TODO: probably race condition with node insertion?
 #[derive(Debug)]
 pub struct Node {
     pub(super) root_hash: OnceLock<TrieHash>,
     is_encoded_longer_than_hash_len: OnceLock<bool>,
+    // TODO: but you can have an out dated encoding value? rehash is solving that?
+    //       checking lazy_dirty as we need to wait write to finish first for atomic update. use notifier instead?
     encoded: OnceLock<Vec<u8>>,
     // lazy_dirty is an atomicbool, but only writers ever set it
     // Therefore, we can always use Relaxed ordering. It's atomic
@@ -459,7 +536,13 @@ impl Node {
     }
 
     pub(super) fn get_encoded<S: ShaleStore<Node>>(&self, store: &S) -> &[u8] {
-        self.encoded.get_or_init(|| self.inner.encode::<S>(store))
+        let encoded = self.encoded.get_or_init(|| self.inner.encode::<S>(store));
+        println!("{:?}", encoded);
+        encoded
+    }
+
+    fn is_encoded(&self) -> bool {
+        self.encoded.get().is_some()
     }
 
     pub(super) fn get_root_hash<S: ShaleStore<Node>>(&self, store: &S) -> &TrieHash {
@@ -842,6 +925,115 @@ impl Storable for Node {
                 cur.write_all(&n.1).map_err(ShaleError::Io)
             }
         }
+    }
+}
+
+pub struct EncodedNode<T> {
+    pub(crate) node: EncodedNodeType,
+    pub(crate) phantom: PhantomData<T>,
+}
+
+pub enum EncodedNodeType {
+    Leaf(LeafNode),
+    Branch {
+        children: [Option<Vec<u8>>; NBRANCH],
+        value: Option<Data>,
+    },
+}
+
+impl<T> Serialize for EncodedNode<T>
+where
+    T: BinaryCodec,
+{
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let other = T::serializer();
+
+        match &self.node {
+            EncodedNodeType::Leaf(n) => {
+                let s = [
+                    Encoded::Raw(from_nibbles(&n.0.encode(true)).collect()),
+                    Encoded::Raw(n.1.to_vec()),
+                ];
+                let mut seq = serializer.serialize_seq(Some(s.len()))?;
+                for e in s {
+                    seq.serialize_element(&e)?;
+                }
+                seq.end()
+            }
+            EncodedNodeType::Branch { children, value } => {
+                let mut s = <[Encoded<Vec<u8>>; NBRANCH + 1]>::default();
+                for (i, c) in children.iter().enumerate() {
+                    match c {
+                        Some(c) => {
+                            if c.len() >= TRIE_HASH_LEN {
+                                let hash = TrieHash(Keccak256::digest(c).into());
+                                s[i] = Encoded::Data(other.serialize(&&hash[..]).unwrap());
+                            } else {
+                                s[i] = Encoded::Raw(c.to_vec());
+                            }
+                        }
+                        None => {}
+                    }
+                }
+                if let Some(Data(val)) = &value {
+                    s[NBRANCH] = Encoded::Data(other.serialize::<Vec<u8>>(val).unwrap());
+                }
+
+                let mut seq = serializer.serialize_seq(Some(s.len()))?;
+                for e in s {
+                    seq.serialize_element(&e)?;
+                }
+                seq.end()
+            }
+        }
+    }
+}
+
+pub trait BinaryCodec {
+    type Serializer;
+    type Deserializer;
+
+    fn serializer() -> Self::Serializer;
+    fn deserializer() -> Self::Deserializer;
+
+    type SerializeError;
+    type DeserializeError;
+
+    fn serialize<T: Serialize>(&self, t: &T) -> Result<Vec<u8>, Self::SerializeError>;
+
+    fn deserialize<'de, T: Deserialize<'de>>(
+        &self,
+        bytes: &'de [u8],
+    ) -> Result<T, Self::DeserializeError>;
+}
+
+#[derive(Default)]
+pub struct Bincode(pub bincode::DefaultOptions);
+
+impl BinaryCodec for Bincode {
+    type SerializeError = bincode::Error;
+    type DeserializeError = Self::SerializeError;
+
+    fn serialize<T: Serialize>(&self, t: &T) -> Result<Vec<u8>, Self::SerializeError> {
+        self.0.clone().serialize(t)
+    }
+
+    fn deserialize<'de, T: Deserialize<'de>>(
+        &self,
+        bytes: &'de [u8],
+    ) -> Result<T, Self::DeserializeError> {
+        self.0.clone().deserialize(bytes)
+    }
+
+    type Serializer = bincode::DefaultOptions;
+    type Deserializer = Self::Serializer;
+
+    fn serializer() -> Self::Serializer {
+        bincode::DefaultOptions::new()
+    }
+
+    fn deserializer() -> Self::Deserializer {
+        bincode::DefaultOptions::new()
     }
 }
 
