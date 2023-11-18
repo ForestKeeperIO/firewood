@@ -263,7 +263,7 @@ impl Node {
         self.root_hash = OnceLock::new();
     }
 
-    pub fn from_branch(node: BranchNode) -> Self {
+    pub fn from_branch<T: Into<Box<BranchNode>>>(node: T) -> Self {
         Self::from(NodeType::Branch(node.into()))
     }
 

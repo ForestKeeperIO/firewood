@@ -133,7 +133,7 @@ impl<N: AsRef<[u8]> + Send> Proof<N> {
             let cur_proof = proofs_map
                 .get(&cur_hash)
                 .ok_or(ProofError::ProofNodeMissing)?;
-            let node = NodeType::decode(cur_proof.as_ref())?;
+            let node = dbg!(NodeType::decode(cur_proof.as_ref())?);
             // TODO: I think this will currently fail if the key is &[];
             let (sub_proof, traversed_nibbles) = locate_subproof(key_nibbles, node)?;
             key_nibbles = traversed_nibbles;
@@ -560,7 +560,7 @@ fn locate_subproof(
                     .iter()
                     .all(|val| key_nibbles.next() == Some(*val));
 
-            if does_not_match {
+            if dbg!(does_not_match) {
                 return Ok((None, Nibbles::<0>::new(&[]).into_iter()));
             }
 
