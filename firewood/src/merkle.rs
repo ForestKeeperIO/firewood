@@ -133,14 +133,14 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
 
     fn dump_(&self, u: DiskAddress, w: &mut dyn Write) -> Result<(), MerkleError> {
         let u_ref = self.get_node(u)?;
-        write!(
-            w,
-            "{u:?} => {}: ",
-            match u_ref.root_hash.get() {
-                Some(h) => hex::encode(**h),
-                None => "<lazy>".to_string(),
-            }
-        )?;
+
+        let hash = match u_ref.root_hash.get() {
+            Some(h) => h,
+            None => u_ref.get_root_hash::<S>(self.store.as_ref()),
+        };
+
+        write!(w, "{u:?} => {}: ", hex::encode(**hash))?;
+
         match &u_ref.inner {
             NodeType::Branch(n) => {
                 writeln!(w, "{n:?}")?;
@@ -154,6 +154,7 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                 self.dump_(n.chd(), w)?
             }
         }
+
         Ok(())
     }
 
@@ -1188,7 +1189,7 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                     match (children.len(), &branch.value, !parents.is_empty()) {
                         // node is invalid, all single-child nodes should have data
                         (1, None, true) => {
-                            let branch_path = &branch.path.0;
+                            let parent_path = &branch.path.0;
 
                             let (child_index, child) = children[0];
                             let child = self.get_node(child)?;
@@ -1199,7 +1200,7 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                             // we can't write directly to the child because we could be changing its size
                             let new_child = match child.inner.clone() {
                                 NodeType::Branch(mut child) => {
-                                    let path = branch_path
+                                    let path = parent_path
                                         .iter()
                                         .copied()
                                         .chain(once(child_index as u8))
@@ -1211,7 +1212,7 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                                     Node::from_branch(child)
                                 }
                                 NodeType::Leaf(mut child) => {
-                                    let path = branch_path
+                                    let path = parent_path
                                         .iter()
                                         .copied()
                                         .chain(once(child_index as u8))
@@ -1253,6 +1254,10 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
 
                 NodeType::Extension(_) => todo!(),
             };
+
+            for (mut parent, _) in parents {
+                parent.write(|u| u.rehash())?;
+            }
 
             data
         };
@@ -2089,16 +2094,12 @@ mod tests {
         let compact_header = shale::StoredView::ptr_to_obj(
             &dm,
             compact_header,
-            // TODO: makes no sense why this is causing issues
-            shale::compact::CompactHeader::MSIZE + 1,
+            shale::compact::CompactHeader::MSIZE,
         )
         .unwrap();
         let mem_meta = Arc::new(dm);
         let mem_payload = Arc::new(DynamicMem::new(0x10000, 0x1));
 
-        // TODO: add path
-        // TODO: don't actually add path, but this should be reset to 1 when all the other "add path"
-        // TODOs are done.
         let cache = shale::ObjCache::new(1);
         let space =
             shale::compact::CompactSpace::new(mem_meta, mem_payload, compact_header, cache, 10, 16)
