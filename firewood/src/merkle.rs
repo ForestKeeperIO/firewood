@@ -1100,6 +1100,179 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
             return Ok(None);
         }
 
+        let mut deleted = Vec::new();
+
+        let data = {
+            let (node, mut parents) =
+                self.get_node_and_parents_by_key(self.get_node(root)?, key)?;
+
+            let Some(node) = node else {
+                return Ok(None);
+            };
+
+            let data = match &node.inner {
+                NodeType::Branch(n) => {
+                    let data = n.value.clone();
+
+                    if data.is_none() {
+                        return Ok(None);
+                    }
+
+                    // TODO: fix mutability issue here
+                    let mut node = self.get_node(node.as_ptr())?;
+
+                    node.write(|branch| {
+                        branch.inner.as_branch_mut().unwrap().value = None;
+                    })?;
+
+                    let branch = node.inner.as_branch().unwrap();
+
+                    let children: Vec<_> = branch
+                        .children
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, child)| child.map(|child| (i, child)))
+                        .collect();
+
+                    // don't change the sentinal node
+                    if children.len() == 1 && !parents.is_empty() {
+                        let branch_path = &branch.path.0;
+
+                        let (child_index, child) = children[0];
+                        let mut child = self.get_node(child)?;
+
+                        child.write(|child| {
+                            let child_path = child.inner.path_mut();
+                            let path = branch_path
+                                .iter()
+                                .copied()
+                                .chain(once(child_index as u8))
+                                .chain(child_path.0.iter().copied())
+                                .collect();
+                            *child_path = PartialPath(path);
+
+                            child.rehash();
+                        })?;
+
+                        set_parent(child.as_ptr(), &mut parents);
+
+                        deleted.push(node.as_ptr());
+                    } else {
+                        node.write(|node| node.rehash())?
+                    }
+
+                    data
+                }
+
+                NodeType::Leaf(n) => {
+                    let data = Some(n.data.clone());
+
+                    // TODO: handle unwrap better
+                    deleted.push(node.as_ptr());
+
+                    let (mut parent, child_index) = parents.pop().unwrap();
+
+                    parent.write(|parent| {
+                        parent.inner.as_branch_mut().unwrap().children[child_index as usize] = None;
+                    })?;
+
+                    let branch = parent.inner.as_branch().unwrap();
+
+                    let children: Vec<_> = branch
+                        .children
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, child)| child.map(|child| (i, child)))
+                        .collect();
+
+                    match (children.len(), &branch.value, !parents.is_empty()) {
+                        // node is invalid, all single-child nodes should have data
+                        (1, None, true) => {
+                            let branch_path = &branch.path.0;
+
+                            let (child_index, child) = children[0];
+                            let child = self.get_node(child)?;
+
+                            // TODO:
+                            // there's an optimization here for when the paths are the same length
+                            // and that clone isn't great but ObjRef causes problems
+                            // we can't write directly to the child because we could be changing its size
+                            let new_child = match child.inner.clone() {
+                                NodeType::Branch(mut child) => {
+                                    let path = branch_path
+                                        .iter()
+                                        .copied()
+                                        .chain(once(child_index as u8))
+                                        .chain(child.path.0.iter().copied())
+                                        .collect();
+
+                                    child.path = PartialPath(path);
+
+                                    Node::from_branch(child)
+                                }
+                                NodeType::Leaf(mut child) => {
+                                    let path = branch_path
+                                        .iter()
+                                        .copied()
+                                        .chain(once(child_index as u8))
+                                        .chain(child.path.0.iter().copied())
+                                        .collect();
+
+                                    child.path = PartialPath(path);
+
+                                    Node::from_leaf(child)
+                                }
+                                NodeType::Extension(_) => todo!(),
+                            };
+
+                            let child = self.put_node(new_child)?.as_ptr();
+
+                            set_parent(child, &mut parents);
+
+                            deleted.push(parent.as_ptr());
+                        }
+
+                        // branch nodes shouldn't have no children
+                        (0, Some(data), true) => {
+                            let leaf = Node::from_leaf(LeafNode::new(
+                                PartialPath(branch.path.0.clone()),
+                                data.clone(),
+                            ));
+
+                            let leaf = self.put_node(leaf)?.as_ptr();
+                            set_parent(leaf, &mut parents);
+
+                            deleted.push(parent.as_ptr());
+                        }
+
+                        _ => parent.write(|parent| parent.rehash())?,
+                    }
+
+                    data
+                }
+
+                NodeType::Extension(_) => todo!(),
+            };
+
+            data
+        };
+
+        for ptr in deleted.into_iter() {
+            self.free_node(dbg!(ptr))?;
+        }
+
+        Ok(data.map(|data| data.0))
+    }
+
+    pub fn remove_old<K: AsRef<[u8]>>(
+        &mut self,
+        key: K,
+        root: DiskAddress,
+    ) -> Result<Option<Vec<u8>>, MerkleError> {
+        if root.is_null() {
+            return Ok(None);
+        }
+
         let (found, parents, deleted) = {
             let (node_ref, mut parents) =
                 self.get_node_and_parents_by_key(self.get_node(root)?, key)?;
@@ -1234,7 +1407,7 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
         let mut key_nibbles = Nibbles::<1>::new(key.as_ref()).into_iter();
 
         loop {
-            let Some(nib) = key_nibbles.next() else {
+            let Some(mut nib) = key_nibbles.next() else {
                 break;
             };
 
@@ -1260,7 +1433,9 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                         return Ok(None);
                     }
 
-                    let Some(nib) = key_nibbles.next() else {
+                    nib = if let Some(nib) = key_nibbles.next() {
+                        nib
+                    } else {
                         break;
                     };
 
@@ -1914,7 +2089,8 @@ mod tests {
         let compact_header = shale::StoredView::ptr_to_obj(
             &dm,
             compact_header,
-            shale::compact::CompactHeader::MSIZE,
+            // TODO: makes no sense why this is causing issues
+            shale::compact::CompactHeader::MSIZE + 1,
         )
         .unwrap();
         let mem_meta = Arc::new(dm);
@@ -2159,7 +2335,14 @@ mod tests {
             let key = &[key_val];
             let val = &[key_val];
 
-            let removed_val = merkle.remove(key, root).unwrap();
+            if key_val == 254 {
+                dbg!("hello");
+            }
+
+            let Ok(removed_val) = merkle.remove(key, root) else {
+                dbg!(key_val);
+                panic!();
+            };
             assert_eq!(removed_val.as_deref(), val.as_slice().into());
 
             let fetched_val = merkle.get(key, root).unwrap();

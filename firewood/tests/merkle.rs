@@ -189,38 +189,59 @@ fn test_root_hash_random_deletions() -> Result<(), DataStoreError> {
             .collect();
         key
     };
+
     for i in 0..10 {
         let mut items = std::collections::HashMap::new();
+
         for _ in 0..10 {
             let val: Vec<u8> = (0..8).map(|_| rng.borrow_mut().gen()).collect();
             items.insert(keygen(), val);
         }
+
         let mut items_ordered: Vec<_> = items.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         items_ordered.sort();
         items_ordered.shuffle(&mut *rng.borrow_mut());
         let mut merkle = new_merkle(0x100000, 0x100000);
+
         for (k, v) in items.iter() {
+            dbg!(&k, &v);
             merkle.insert(k, v.to_vec())?;
         }
+
+        for (k, v) in items.iter() {
+            dbg!(k);
+            assert_eq!(&*merkle.get(k)?.unwrap(), &v[..]);
+            assert_eq!(&*merkle.get_mut(k)?.unwrap().get(), &v[..]);
+        }
+
         for (k, _) in items_ordered.into_iter() {
             assert!(merkle.get(&k)?.is_some());
             assert!(merkle.get_mut(&k)?.is_some());
+
             merkle.remove(&k)?;
+
             assert!(merkle.get(&k)?.is_none());
             assert!(merkle.get_mut(&k)?.is_none());
+
             items.remove(&k);
+
             for (k, v) in items.iter() {
+                dbg!(k);
                 assert_eq!(&*merkle.get(k)?.unwrap(), &v[..]);
                 assert_eq!(&*merkle.get_mut(k)?.unwrap().get(), &v[..]);
             }
+
             let h = triehash::trie_root::<keccak_hasher::KeccakHasher, Vec<_>, _, _>(
                 items.iter().collect(),
             );
+
             let h0 = merkle.root_hash()?;
+
             if h[..] != *h0 {
                 println!("{} != {}", hex::encode(h), hex::encode(*h0));
             }
         }
+
         println!("i = {i}");
     }
     Ok(())

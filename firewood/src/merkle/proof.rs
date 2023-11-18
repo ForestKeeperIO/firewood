@@ -563,7 +563,7 @@ fn locate_subproof(
                     .iter()
                     .all(|val| key_nibbles.next() == Some(*val));
 
-            if does_not_match {
+            if dbg!(does_not_match) {
                 return Ok((None, Nibbles::<0>::new(&[]).into_iter()));
             }
 
