@@ -24,18 +24,8 @@ fn merkle_build_test<
     compact_size: u64,
 ) -> Result<MerkleSetup<Store>, DataStoreError> {
     let mut merkle = new_merkle(meta_size, compact_size);
-    let mut j = 0;
     for (k, v) in items.iter() {
-        dbg!(j);
-
-        if j == 8 {
-            dbg!("this one breaks");
-        }
-
-        dbg!(&k);
         merkle.insert(k, v.as_ref().to_vec())?;
-
-        j += 1;
     }
 
     Ok(merkle)

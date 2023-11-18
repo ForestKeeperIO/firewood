@@ -289,7 +289,7 @@ impl<T: Storable> StoredView<T> {
 
     fn estimate_mem_image(&self) -> Option<u64> {
         let len = self.decoded.serialized_len();
-        if len > dbg!(self.len_limit) {
+        if len > self.len_limit {
             None
         } else {
             Some(len)
