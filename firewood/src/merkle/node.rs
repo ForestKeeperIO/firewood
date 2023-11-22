@@ -136,7 +136,7 @@ impl NodeType {
 
     pub fn path_mut(&mut self) -> &mut PartialPath {
         match self {
-            NodeType::Branch(_u) => todo!(),
+            NodeType::Branch(u) => &mut u.path,
             NodeType::Leaf(node) => &mut node.path,
             NodeType::Extension(node) => &mut node.path,
         }
@@ -220,7 +220,7 @@ impl Node {
                 encoded: OnceLock::new(),
                 inner: NodeType::Branch(
                     BranchNode {
-                        // path: vec![].into(),
+                        path: vec![].into(),
                         children: [Some(DiskAddress::null()); BranchNode::MAX_CHILDREN],
                         value: Some(Data(Vec::new())),
                         children_encoded: Default::default(),
@@ -503,7 +503,7 @@ pub(super) mod tests {
             .unwrap_or_default();
 
         Node::from_branch(BranchNode {
-            // path: vec![].into(),
+            path: vec![].into(),
             children,
             value: value.map(Data),
             children_encoded,
