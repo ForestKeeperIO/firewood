@@ -129,11 +129,18 @@ impl<S: ShaleStore<Node> + Send + Sync> Merkle<S> {
                 let mut children: [Option<Vec<u8>>; NBRANCH] = Default::default();
                 // TODO: add encoding node n.chd_encode();
                 for (pos, chd) in n.chd().iter().enumerate() {
-                    if let Some(chd_addr) = chd {
-                        let node = self.get_node(*chd_addr).unwrap();
+                    match chd {
+                        Some(chd_addr) => {
+                            let node = self.get_node(*chd_addr).unwrap();
 
-                        let chd_encoded = self.get_encoded::<T>(node);
-                        children[pos] = Some(chd_encoded);
+                            let chd_encoded = self.get_encoded::<T>(node);
+                            children[pos] = Some(chd_encoded);
+                        }
+                        None => {
+                            if let Some(v) = &n.children_encoded[pos] {
+                                children[pos] = Some(v.to_vec());
+                            }
+                        }
                     }
                 }
                 EncodedNode::<T> {
@@ -1702,7 +1709,7 @@ mod tests {
         let expexted = r2.get_encoded::<CompactSpace<Node, DynamicMem>>(&merkle.store);
 
         println!("encoded {:?}", encoded);
-        println!("{:?}", expexted);
+        println!("expected {:?}", expexted);
         let fetched_val = merkle.get(key, root).unwrap();
 
         assert_eq!(fetched_val.as_deref(), val.as_slice().into());

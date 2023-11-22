@@ -993,10 +993,10 @@ pub trait BinaryCodec {
     type Serializer;
     type Deserializer;
 
-    fn serializer() -> Self::Serializer;
-    fn deserializer() -> Self::Deserializer;
+    fn serializer() -> Self;
+    fn deserializer() -> Self;
 
-    type SerializeError;
+    type SerializeError: Debug;
     type DeserializeError;
 
     fn serialize<T: Serialize>(&self, t: &T) -> Result<Vec<u8>, Self::SerializeError>;
@@ -1028,12 +1028,12 @@ impl BinaryCodec for Bincode {
     type Serializer = bincode::DefaultOptions;
     type Deserializer = Self::Serializer;
 
-    fn serializer() -> Self::Serializer {
-        bincode::DefaultOptions::new()
+    fn serializer() -> Self {
+        Bincode(bincode::DefaultOptions::new())
     }
 
-    fn deserializer() -> Self::Deserializer {
-        bincode::DefaultOptions::new()
+    fn deserializer() -> Self {
+        Bincode(bincode::DefaultOptions::new())
     }
 }
 
