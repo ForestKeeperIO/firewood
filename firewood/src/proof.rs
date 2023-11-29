@@ -1,22 +1,18 @@
 // Copyright (C) 2023, Ava Labs, Inc. All rights reserved.
 // See the file LICENSE.md for licensing terms.
 
-use std::cmp::Ordering;
-use std::ops::Deref;
-
-use crate::shale::{disk_address::DiskAddress, ShaleError, ShaleStore};
-use nix::errno::Errno;
-use sha3::Digest;
-use thiserror::Error;
-
-use crate::nibbles::Nibbles;
-use crate::nibbles::NibblesIterator;
 use crate::{
     db::DbError,
     merkle::{to_nibble_array, Merkle, MerkleError, Node, NodeType},
     merkle_util::{new_merkle, DataStoreError, MerkleSetup},
+    nibbles::{Nibbles, NibblesIterator},
+    shale::{disk_address::DiskAddress, ShaleError, ShaleStore},
     v2::api::Proof,
 };
+use nix::errno::Errno;
+use sha3::Digest;
+use std::{cmp::Ordering, ops::Deref};
+use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ProofError {

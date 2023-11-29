@@ -1,9 +1,8 @@
 // Copyright (C) 2023, Ava Labs, Inc. All rights reserved.
 // See the file LICENSE.md for licensing terms.
 
-use std::sync::Arc;
-
 use nix::errno::Errno;
+use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Clone, Debug, Error)]

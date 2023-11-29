@@ -2,13 +2,14 @@
 // See the file LICENSE.md for licensing terms.
 
 pub(crate) use disk_address::DiskAddress;
-use std::any::type_name;
-use std::collections::{HashMap, HashSet};
-use std::fmt::{self, Debug, Formatter};
-use std::num::NonZeroUsize;
-use std::ops::{Deref, DerefMut};
-use std::sync::{Arc, RwLock, RwLockWriteGuard};
-
+use std::{
+    any::type_name,
+    collections::{HashMap, HashSet},
+    fmt::{self, Debug, Formatter},
+    num::NonZeroUsize,
+    ops::{Deref, DerefMut},
+    sync::{Arc, RwLock, RwLockWriteGuard},
+};
 use thiserror::Error;
 
 pub mod cached;

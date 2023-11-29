@@ -4,8 +4,7 @@
 #[cfg(test)]
 mod common;
 
-use std::collections::HashMap;
-use std::rc::Rc;
+use std::{collections::HashMap, rc::Rc};
 
 fn multi_point_failure(sims: &[common::PaintingSim]) {
     fn track_recursion(sims: &[common::PaintingSim], state: &common::WalStoreEmulState, f: usize) {

@@ -5,9 +5,8 @@ use firewood::{
     db::{DbConfig, WalConfig},
     v2::api::{self, BatchOp, Db as _, DbView, Proposal},
 };
-use tokio::task::block_in_place;
-
 use std::{collections::VecDeque, env::temp_dir, path::PathBuf, sync::Arc};
+use tokio::task::block_in_place;
 
 mod common;
 use common::TestDbCreator;

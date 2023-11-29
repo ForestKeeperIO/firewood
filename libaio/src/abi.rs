@@ -7,8 +7,7 @@
 
 pub use libc::timespec;
 use libc::{c_int, c_long, size_t};
-use std::default::Default;
-use std::mem::zeroed;
+use std::{default::Default, mem::zeroed};
 
 #[repr(C)]
 pub enum IoCmd {

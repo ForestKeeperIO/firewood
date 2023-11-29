@@ -4,8 +4,7 @@
 use super::{Data, Encoded, Node};
 use crate::{
     merkle::{PartialPath, TRIE_HASH_LEN},
-    shale::{DiskAddress, Storable},
-    shale::{ShaleError, ShaleStore},
+    shale::{DiskAddress, ShaleError, ShaleStore, Storable},
 };
 use bincode::{Error, Options};
 use std::{

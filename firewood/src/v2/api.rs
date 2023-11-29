@@ -1,9 +1,8 @@
 // Copyright (C) 2023, Ava Labs, Inc. All rights reserved.
 // See the file LICENSE.md for licensing terms.
 
-use std::{collections::HashMap, fmt::Debug, sync::Arc};
-
 use async_trait::async_trait;
+use std::{collections::HashMap, fmt::Debug, sync::Arc};
 
 /// A `KeyType` is something that can be xcast to a u8 reference,
 /// and can be sent and shared across threads. References with

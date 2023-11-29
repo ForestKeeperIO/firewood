@@ -1,14 +1,14 @@
 // Copyright (C) 2023, Ava Labs, Inc. All rights reserved.
 // See the file LICENSE.md for licensing terms.
 
-use std::hash::Hash;
-use std::mem::size_of;
-use std::num::NonZeroUsize;
-use std::ops::{Deref, DerefMut};
-
-use bytemuck::NoUninit;
-
 use crate::shale::{CachedStore, ShaleError, Storable};
+use bytemuck::NoUninit;
+use std::{
+    hash::Hash,
+    mem::size_of,
+    num::NonZeroUsize,
+    ops::{Deref, DerefMut},
+};
 
 /// The virtual disk address of an object
 #[repr(C)]

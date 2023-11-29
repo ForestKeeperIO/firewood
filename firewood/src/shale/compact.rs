@@ -1,14 +1,17 @@
 // Copyright (C) 2023, Ava Labs, Inc. All rights reserved.
 // See the file LICENSE.md for licensing terms.
 
+use super::{
+    disk_address::DiskAddress, CachedStore, Obj, ObjRef, ShaleError, ShaleStore, Storable,
+    StoredView,
+};
 use crate::shale::ObjCache;
-
-use super::disk_address::DiskAddress;
-use super::{CachedStore, Obj, ObjRef, ShaleError, ShaleStore, Storable, StoredView};
-use std::fmt::Debug;
-use std::io::{Cursor, Write};
-use std::num::NonZeroUsize;
-use std::sync::{Arc, RwLock};
+use std::{
+    fmt::Debug,
+    io::{Cursor, Write},
+    num::NonZeroUsize,
+    sync::{Arc, RwLock},
+};
 
 #[derive(Debug)]
 pub struct CompactHeader {
@@ -587,11 +590,9 @@ impl<T: Storable + 'static, M: CachedStore + Send + Sync> ShaleStore<T> for Comp
 
 #[cfg(test)]
 mod tests {
-    use sha3::Digest;
-
-    use crate::shale::{self, cached::DynamicMem, ObjCache};
-
     use super::*;
+    use crate::shale::{self, cached::DynamicMem, ObjCache};
+    use sha3::Digest;
 
     const HASH_SIZE: usize = 32;
     const ZERO_HASH: Hash = Hash([0u8; HASH_SIZE]);

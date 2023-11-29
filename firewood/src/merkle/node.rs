@@ -22,15 +22,12 @@ mod extension;
 mod leaf;
 mod partial_path;
 
+use super::{from_nibbles, TrieHash, TRIE_HASH_LEN};
+use crate::{merkle::to_nibble_array, nibbles::Nibbles};
 pub use branch::BranchNode;
 pub use extension::ExtNode;
 pub use leaf::{LeafNode, SIZE as LEAF_NODE_SIZE};
 pub use partial_path::PartialPath;
-
-use crate::merkle::to_nibble_array;
-use crate::nibbles::Nibbles;
-
-use super::{from_nibbles, TrieHash, TRIE_HASH_LEN};
 
 bitflags! {
     // should only ever be the size of a nibble
@@ -596,10 +593,9 @@ impl Storable for Node {
 
 #[cfg(test)]
 pub(super) mod tests {
-    use std::array::from_fn;
-
     use super::*;
     use crate::shale::cached::PlainMem;
+    use std::array::from_fn;
     use test_case::test_case;
 
     pub fn leaf(path: Vec<u8>, data: Vec<u8>) -> Node {

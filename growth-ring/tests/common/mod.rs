@@ -7,12 +7,13 @@ use futures::executor::block_on;
 use growthring::wal::{WalBytes, WalError, WalFile, WalLoader, WalPos, WalRingId, WalStore};
 use indexmap::{map::Entry, IndexMap};
 use rand::Rng;
-use std::cell::RefCell;
-use std::collections::VecDeque;
-use std::collections::{hash_map, HashMap};
-use std::convert::TryInto;
-use std::path::PathBuf;
-use std::rc::Rc;
+use std::{
+    cell::RefCell,
+    collections::{hash_map, HashMap, VecDeque},
+    convert::TryInto,
+    path::PathBuf,
+    rc::Rc,
+};
 
 pub trait FailGen {
     fn next_fail(&self) -> bool;

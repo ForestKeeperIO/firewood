@@ -41,13 +41,14 @@ mod abi;
 use abi::IoCb;
 use libc::time_t;
 use parking_lot::Mutex;
-use std::collections::{hash_map, HashMap};
-use std::os::raw::c_long;
-use std::os::unix::io::RawFd;
-use std::pin::Pin;
-use std::sync::{
-    atomic::{AtomicPtr, AtomicUsize, Ordering},
-    Arc,
+use std::{
+    collections::{hash_map, HashMap},
+    os::{raw::c_long, unix::io::RawFd},
+    pin::Pin,
+    sync::{
+        atomic::{AtomicPtr, AtomicUsize, Ordering},
+        Arc,
+    },
 };
 
 const LIBAIO_EAGAIN: libc::c_int = -libc::EAGAIN;

@@ -1,12 +1,10 @@
 // Copyright (C) 2023, Ava Labs, Inc. All rights reserved.
 // See the file LICENSE.md for licensing terms.
 
-use std::fmt::{Debug, Error as FmtError, Formatter};
-
-use bincode::Options;
-
 use super::{Data, Encoded};
 use crate::merkle::{from_nibbles, PartialPath};
+use bincode::Options;
+use std::fmt::{Debug, Error as FmtError, Formatter};
 
 pub const SIZE: usize = 2;
 

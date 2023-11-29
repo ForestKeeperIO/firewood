@@ -2,23 +2,24 @@
 // See the file LICENSE.md for licensing terms.
 
 //! Disk buffer for staging in memory pages and flushing them to disk.
-use std::fmt::Debug;
-use std::ops::IndexMut;
-use std::os::fd::{AsFd, AsRawFd};
-use std::path::{Path, PathBuf};
-use std::rc::Rc;
-use std::sync::Arc;
-use std::{cell::RefCell, collections::HashMap};
-
 use super::{AshRecord, FilePool, Page, StoreDelta, StoreError, WalConfig, PAGE_SIZE_NBIT};
-use crate::shale::SpaceId;
-use crate::storage::DeltaPage;
+use crate::{shale::SpaceId, storage::DeltaPage};
 use aiofut::{AioBuilder, AioError, AioManager};
 use futures::future::join_all;
 use growthring::{
     wal::{RecoverPolicy, WalLoader, WalWriter},
     walerror::WalError,
     WalFileImpl, WalStoreImpl,
+};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    fmt::Debug,
+    ops::IndexMut,
+    os::fd::{AsFd, AsRawFd},
+    path::{Path, PathBuf},
+    rc::Rc,
+    sync::Arc,
 };
 use tokio::{
     sync::{
@@ -616,19 +617,18 @@ impl DiskBufferRequester {
 
 #[cfg(test)]
 mod tests {
-    use sha3::Digest;
-    use std::path::{Path, PathBuf};
-    use tokio::task::block_in_place;
-
     use super::*;
-    use crate::shale::CachedStore;
     use crate::{
         file,
+        shale::CachedStore,
         storage::{
             Ash, CachedSpace, DeltaPage, MemStoreR, StoreConfig, StoreRevMut, StoreRevMutDelta,
             StoreRevShared, ZeroStore,
         },
     };
+    use sha3::Digest;
+    use std::path::{Path, PathBuf};
+    use tokio::task::block_in_place;
 
     const STATE_SPACE: SpaceId = 0x0;
     const HASH_SIZE: usize = 32;

@@ -1,14 +1,13 @@
 // Copyright (C) 2023, Ava Labs, Inc. All rights reserved.
 // See the file LICENSE.md for licensing terms.
 
-use std::sync::Arc;
-
 use clap::Args;
 use firewood::{
     db::{BatchOp, Db, DbConfig, WalConfig},
     v2::api::{self, Db as _, Proposal},
 };
 use log;
+use std::sync::Arc;
 
 #[derive(Debug, Args)]
 pub struct Options {

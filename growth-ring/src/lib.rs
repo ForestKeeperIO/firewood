@@ -52,9 +52,11 @@ pub mod wal;
 pub mod walerror;
 
 use async_trait::async_trait;
-use std::fs;
-use std::io::SeekFrom;
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    io::SeekFrom,
+    path::{Path, PathBuf},
+};
 use tokio::{
     fs::{File, OpenOptions},
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},

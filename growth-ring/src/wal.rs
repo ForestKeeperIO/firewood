@@ -1,6 +1,7 @@
 // Copyright (C) 2023, Ava Labs, Inc. All rights reserved.
 // See the file LICENSE.md for licensing terms.
 
+pub use crate::walerror::WalError;
 use async_trait::async_trait;
 use bytemuck::{cast_slice, AnyBitPattern};
 use futures::{
@@ -8,22 +9,17 @@ use futures::{
     stream::StreamExt,
     Future,
 };
-
-use std::convert::{TryFrom, TryInto};
-use std::mem::MaybeUninit;
-use std::num::NonZeroUsize;
-use std::pin::Pin;
 use std::{
     cell::{RefCell, UnsafeCell},
-    ffi::OsStr,
-    path::{Path, PathBuf},
-};
-use std::{
     collections::{hash_map, BinaryHeap, HashMap, VecDeque},
+    convert::{TryFrom, TryInto},
+    ffi::OsStr,
     marker::PhantomData,
+    mem::MaybeUninit,
+    num::NonZeroUsize,
+    path::{Path, PathBuf},
+    pin::Pin,
 };
-
-pub use crate::walerror::WalError;
 
 enum WalRingType {
     #[allow(dead_code)]

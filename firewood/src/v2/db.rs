@@ -1,18 +1,14 @@
 // Copyright (C) 2023, Ava Labs, Inc. All rights reserved.
 // See the file LICENSE.md for licensing terms.
 
-use std::{fmt::Debug, ops::DerefMut, sync::Arc};
-
-use tokio::sync::Mutex;
-
-use async_trait::async_trait;
-
+use super::propose;
 use crate::{
     db::DbError,
     v2::api::{self, Batch, KeyType, ValueType},
 };
-
-use super::propose;
+use async_trait::async_trait;
+use std::{fmt::Debug, ops::DerefMut, sync::Arc};
+use tokio::sync::Mutex;
 
 #[cfg_attr(doc, aquamarine::aquamarine)]
 /// ```mermaid

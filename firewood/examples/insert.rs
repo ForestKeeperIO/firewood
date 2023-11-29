@@ -5,13 +5,12 @@
 // insert some random keys using the front-end API.
 
 use clap::Parser;
-use std::{collections::HashMap, error::Error, ops::RangeInclusive, sync::Arc, time::Instant};
-
 use firewood::{
     db::{Batch, BatchOp, Db, DbConfig},
     v2::api::{Db as _, DbView, Proposal},
 };
 use rand::{distributions::Alphanumeric, Rng};
+use std::{collections::HashMap, error::Error, ops::RangeInclusive, sync::Arc, time::Instant};
 
 #[derive(Parser, Debug)]
 struct Args {

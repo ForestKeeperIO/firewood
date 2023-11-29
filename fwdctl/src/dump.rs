@@ -1,8 +1,6 @@
 // Copyright (C) 2023, Ava Labs, Inc. All rights reserved.
 // See the file LICENSE.md for licensing terms.
 
-use std::borrow::Cow;
-
 use clap::Args;
 use firewood::{
     db::{Db, DbConfig, WalConfig},
@@ -10,6 +8,7 @@ use firewood::{
 };
 use futures_util::StreamExt;
 use log;
+use std::borrow::Cow;
 
 #[derive(Debug, Args)]
 pub struct Options {

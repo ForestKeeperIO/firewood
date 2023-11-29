@@ -2,10 +2,9 @@
 // See the file LICENSE.md for licensing terms.
 
 use clap::Args;
-use firewood::v2::api::Db as _;
 use firewood::{
     db::{Db, DbConfig, WalConfig},
-    v2::api,
+    v2::{api, api::Db as _},
 };
 use log;
 use std::str;

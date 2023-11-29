@@ -1,13 +1,12 @@
 // Copyright (C) 2023, Ava Labs, Inc. All rights reserved.
 // See the file LICENSE.md for licensing terms.
 
-use bincode::Options;
-
 use super::{Encoded, Node};
 use crate::{
     merkle::{from_nibbles, PartialPath, TRIE_HASH_LEN},
     shale::{DiskAddress, ShaleStore},
 };
+use bincode::Options;
 use std::fmt::{Debug, Error as FmtError, Formatter};
 
 #[derive(PartialEq, Eq, Clone)]

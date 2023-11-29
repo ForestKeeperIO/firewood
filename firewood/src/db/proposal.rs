@@ -6,9 +6,10 @@ use super::{
     DbHeader, DbInner, DbRev, DbRevInner, SharedStore, Store, Universe, MERKLE_META_SPACE,
     MERKLE_PAYLOAD_SPACE, ROOT_HASH_SPACE,
 };
-use crate::shale::CachedStore;
+pub use crate::v2::api::{Batch, BatchOp};
 use crate::{
     merkle::{TrieHash, TRIE_HASH_LEN},
+    shale::CachedStore,
     storage::{buffer::BufferWrite, AshRecord, StoreRevMut},
     v2::api::{self, KeyType, ValueType},
 };
@@ -16,8 +17,6 @@ use async_trait::async_trait;
 use parking_lot::{Mutex, RwLock};
 use std::{io::ErrorKind, sync::Arc};
 use tokio::task::block_in_place;
-
-pub use crate::v2::api::{Batch, BatchOp};
 
 /// An atomic batch of changes proposed against the latest committed revision,
 /// or any existing [Proposal]. Multiple proposals can be created against the

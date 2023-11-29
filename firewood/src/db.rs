@@ -7,9 +7,15 @@ pub use crate::{
     v2::api::{Batch, BatchOp, Proposal},
 };
 use crate::{
-    file,
+    file, merkle,
     merkle::{Merkle, MerkleError, Node, TrieHash, TRIE_HASH_LEN},
     proof::ProofError,
+    shale::{
+        self,
+        compact::{CompactSpace, CompactSpaceHeader},
+        disk_address::DiskAddress,
+        CachedStore, Obj, ShaleError, ShaleStore, SpaceId, Storable, StoredView,
+    },
     storage::{
         buffer::{DiskBuffer, DiskBufferRequester},
         CachedSpace, MemStoreR, SpaceWrite, StoreConfig, StoreDelta, StoreRevMut, StoreRevShared,
@@ -17,18 +23,8 @@ use crate::{
     },
     v2::api::{self, HashKey, KeyType, Proof, ValueType},
 };
-use crate::{
-    merkle,
-    shale::{
-        self,
-        compact::{CompactSpace, CompactSpaceHeader},
-        disk_address::DiskAddress,
-        CachedStore, Obj, ShaleError, ShaleStore, SpaceId, Storable, StoredView,
-    },
-};
 use async_trait::async_trait;
 use bytemuck::{cast_slice, AnyBitPattern};
-
 use metered::metered;
 use parking_lot::{Mutex, RwLock};
 use std::{

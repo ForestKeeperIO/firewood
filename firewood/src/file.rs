@@ -3,12 +3,13 @@
 
 // Copied from CedrusDB
 
-use std::fs::{create_dir, remove_dir_all};
-use std::ops::Deref;
-use std::os::fd::OwnedFd;
-
-use std::path::{Path, PathBuf};
-use std::{io::ErrorKind, os::unix::prelude::OpenOptionsExt};
+use std::{
+    fs::{create_dir, remove_dir_all},
+    io::ErrorKind,
+    ops::Deref,
+    os::{fd::OwnedFd, unix::prelude::OpenOptionsExt},
+    path::{Path, PathBuf},
+};
 
 pub struct File {
     fd: OwnedFd,

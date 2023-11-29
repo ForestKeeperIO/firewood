@@ -3,8 +3,10 @@
 
 // TODO: try to get rid of the use `RefCell` in this file
 use self::buffer::DiskBufferRequester;
-use crate::file::File;
-use crate::shale::{self, CachedStore, CachedView, SendSyncDerefMut, SpaceId};
+use crate::{
+    file::File,
+    shale::{self, CachedStore, CachedView, SendSyncDerefMut, SpaceId},
+};
 use nix::fcntl::{flock, FlockArg};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
