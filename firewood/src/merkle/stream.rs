@@ -171,6 +171,7 @@ fn find_next_result<'a, S: ShaleStore<Node>, T>(
     let next = find_next_node_with_data(merkle, parents)?.map(|(next_node, value)| {
         let node_path_iter = match next_node.inner() {
             NodeType::Leaf(leaf) => leaf.path.iter().copied(),
+            NodeType::Extension(extension) => extension.path.iter().copied(),
             _ => [].iter().copied(),
         };
 
