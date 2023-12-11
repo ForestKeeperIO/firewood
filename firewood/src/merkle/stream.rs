@@ -109,7 +109,7 @@ impl<'a, S: ShaleStore<Node> + Send + Sync, T> Stream for MerkleKeyValueStream<'
                     let next_result = value.map(|value| {
                         let value = value.to_vec();
 
-                        Ok(dbg!(std::mem::take(key), value))
+                        Ok((std::mem::take(key), value))
                     });
 
                     parents.push((found_node, 0));
@@ -329,7 +329,7 @@ fn nibble_iter_from_parents<'a>(parents: &'a [(ObjRef, u8)]) -> impl Iterator<It
 }
 
 fn key_from_nibble_iter<Iter: Iterator<Item = u8>>(mut nibbles: Iter) -> Vec<u8> {
-    let mut data = Vec::with_capacity(nibbles.size_hint().0);
+    let mut data = Vec::with_capacity(nibbles.size_hint().0 / 2);
 
     while let (Some(hi), Some(lo)) = (nibbles.next(), nibbles.next()) {
         data.push((hi << 4) + lo);
