@@ -60,20 +60,17 @@ impl<'a, S: ShaleStore<Node> + Send + Sync, T> Stream for MerkleKeyValueStream<'
                     .get_node(*merkle_root)
                     .map_err(|e| api::Error::InternalError(Box::new(e)))?;
 
-                match root.inner() {
-                    NodeType::Branch(branch) => {
-                        if let Some(value) = branch.value.as_ref() {
-                            let key = vec![];
-                            let value = value.to_vec();
+                if let NodeType::Branch(branch) = root.inner() {
+                    if let Some(value) = branch.value.as_ref() {
+                        let key = vec![];
+                        let value = value.to_vec();
 
-                            self.key_state = IteratorState::Iterating {
-                                parents: vec![(root, 0)],
-                            };
+                        self.key_state = IteratorState::Iterating {
+                            parents: vec![(root, 0)],
+                        };
 
-                            return Poll::Ready(Some(Ok((key, value))));
-                        }
+                        return Poll::Ready(Some(Ok((key, value))));
                     }
-                    _ => (),
                 }
 
                 // always put the sentinal node in parents
