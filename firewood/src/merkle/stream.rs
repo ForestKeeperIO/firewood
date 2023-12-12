@@ -60,19 +60,6 @@ impl<'a, S: ShaleStore<Node> + Send + Sync, T> Stream for MerkleKeyValueStream<'
                     .get_node(*merkle_root)
                     .map_err(|e| api::Error::InternalError(Box::new(e)))?;
 
-                if let NodeType::Branch(branch) = root.inner() {
-                    if let Some(value) = branch.value.as_ref() {
-                        let key = vec![];
-                        let value = value.to_vec();
-
-                        self.key_state = IteratorState::Iterating {
-                            parents: vec![(root, 0)],
-                        };
-
-                        return Poll::Ready(Some(Ok((key, value))));
-                    }
-                }
-
                 // always put the sentinal node in parents
                 let mut parents = vec![(root, 0)];
 
@@ -323,10 +310,30 @@ fn nibble_iter_from_parents<'a>(parents: &'a [(ObjRef, u8)]) -> impl Iterator<It
         .iter()
         .skip(1) // always skip the sentinal node
         .flat_map(|(parent, child_nibble)| match parent.inner() {
-            NodeType::Branch(_) => vec![*child_nibble],
-            NodeType::Extension(extension) => extension.path.to_vec(),
-            NodeType::Leaf(leaf) => leaf.path.to_vec(),
+            NodeType::Branch(_) => Either::Left(std::iter::once(*child_nibble)),
+            NodeType::Extension(extension) => Either::Right(extension.path.iter().copied()),
+            NodeType::Leaf(leaf) => Either::Right(leaf.path.iter().copied()),
         })
+}
+
+enum Either<T, U> {
+    Left(T),
+    Right(U),
+}
+
+impl<T, U> Iterator for Either<T, U>
+where
+    T: Iterator,
+    U: Iterator<Item = T::Item>,
+{
+    type Item = T::Item;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Left(left) => left.next(),
+            Self::Right(right) => right.next(),
+        }
+    }
 }
 
 fn key_from_nibble_iter<Iter: Iterator<Item = u8>>(mut nibbles: Iter) -> Vec<u8> {
@@ -384,6 +391,21 @@ mod tests {
         }
 
         assert!(it.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn root_with_empty_data() {
+        let mut merkle = create_test_merkle();
+        let root = merkle.init_root().unwrap();
+
+        let key = vec![];
+        let value = vec![0x00];
+
+        merkle.insert(&key, value.clone(), root).unwrap();
+
+        let mut stream = merkle.get_iter(None::<&[u8]>, root).unwrap();
+
+        assert_eq!(stream.next().await.unwrap().unwrap(), (key, value));
     }
 
     #[tokio::test]
