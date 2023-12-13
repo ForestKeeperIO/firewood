@@ -1491,28 +1491,24 @@ mod tests {
         assert_eq!(encoded, new_node_encoded);
     }
 
-    #[test_case(leaf(Vec::new(), Vec::new()) ; "empty leaf encoding")]
-    #[test_case(leaf(vec![1, 2, 3], vec![4, 5]) ; "leaf encoding")]
-    #[test_case(branch(Some(b"value".to_vec()), vec![1, 2, 3].into()) ; "branch with chd")]
-    #[test_case(branch(Some(b"value".to_vec()), None); "branch without chd")]
-    #[test_case(branch(None, None); "branch without value and chd")]
-    fn node_encode_decode(node: Node) {
-        let merkle = create_test_merkle();
-        let node_ref = merkle.put_node(node.clone()).unwrap();
-
-        let encoded = merkle.encode(&node_ref).unwrap();
-        let new_node = Node::from(merkle.decode(encoded.as_ref()).unwrap());
-
-        assert_eq!(node, new_node);
-    }
-
-    #[test_case(leaf(Vec::new(), Vec::new()) ; "empty leaf encoding")]
-    #[test_case(leaf(vec![1, 2, 3], vec![4, 5]) ; "leaf encoding")]
-    #[test_case(branch(Some(b"value".to_vec()), vec![1, 2, 3].into()) ; "branch with chd")]
-    #[test_case(branch(Some(b"value".to_vec()), Some(Vec::new())); "branch with empty chd")]
-    #[test_case(branch(Some(Vec::new()), vec![1, 2, 3].into()); "branch with empty value")]
-    fn node_encode_decode_plain(node: Node) {
-        let merkle = create_generic_test_merkle::<PlainCodec>();
+    #[test_case(Bincode::default(), leaf(Vec::new(), Vec::new()) ; "empty leaf bincode encoding")]
+    #[test_case(PlainCodec::default(), leaf(Vec::new(), Vec::new()) ; "empty leaf plain encoding")]
+    #[test_case(Bincode::default(), leaf(vec![1, 2, 3], vec![4, 5]) ; "leaf bincode encoding")]
+    #[test_case(PlainCodec::default(), leaf(vec![1, 2, 3], vec![4, 5]) ; "leaf plain encoding")]
+    #[test_case(Bincode::default(), branch(Some(b"value".to_vec()), vec![1, 2, 3].into()) ; "bincode branch with chd")]
+    #[test_case(PlainCodec::default(), branch(Some(b"value".to_vec()), vec![1, 2, 3].into()) ; "plain branch with chd")]
+    #[test_case(Bincode::default(), branch(Some(b"value".to_vec()), None); "bincode branch without chd")]
+    #[test_case(PlainCodec::default(), branch(Some(b"value".to_vec()), None); "plain branch without chd")]
+    #[test_case(Bincode::default(), branch(None, None); "bincode branch without value and chd")]
+    #[test_case(PlainCodec::default(), branch(None, None); "plain branch without value and chd")]
+    #[test_case(Bincode::default(), branch(Some(Vec::new()), vec![1, 2, 3].into()); "bincode branch with empty value")]
+    #[test_case(PlainCodec::default(), branch(Some(Vec::new()), vec![1, 2, 3].into()); "plain branch with empty value")]
+    fn node_encode_decode<Codec: super::node::BinarySerde>(_codec: Codec, node: Node)
+    where
+        Codec: BinarySerde,
+        for<'de> EncodedNode<Codec>: serde::Serialize + serde::Deserialize<'de>,
+    {
+        let merkle = create_generic_test_merkle::<Codec>();
         let node_ref = merkle.put_node(node.clone()).unwrap();
 
         let encoded = merkle.encode(&node_ref).unwrap();
