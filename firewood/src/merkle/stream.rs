@@ -9,7 +9,7 @@ use crate::{
 use futures::Stream;
 use std::{ops::Not, task::Poll};
 
-pub(super) enum IteratorState<'a> {
+enum IteratorState<'a> {
     /// Start iterating at the beginning of the trie,
     /// returning the lowest key/value pair first
     StartAtBeginning,
@@ -36,9 +36,28 @@ impl<'a> Default for IteratorState<'a> {
 
 /// A MerkleKeyValueStream iterates over keys/values for a merkle trie.
 pub struct MerkleKeyValueStream<'a, S, T> {
-    pub(super) key_state: IteratorState<'a>,
-    pub(super) merkle_root: DiskAddress,
-    pub(super) merkle: &'a Merkle<S, T>,
+    key_state: IteratorState<'a>,
+    merkle_root: DiskAddress,
+    merkle: &'a Merkle<S, T>,
+}
+
+impl<'a, S, T> MerkleKeyValueStream<'a, S, T> {
+    /// Create a new stream that iterates over the keys/values in the merkle trie
+    /// starting at the given key.
+    ///
+    /// If the key is not in the trie, the stream will start at the next key
+    /// after the given key.
+    pub fn new<K: AsRef<[u8]>>(
+        starting: Option<K>,
+        merkle_root: DiskAddress,
+        merkle: &'a Merkle<S, T>,
+    ) -> Self {
+        Self {
+            key_state: IteratorState::new(starting),
+            merkle_root,
+            merkle,
+        }
+    }
 }
 
 impl<'a, S: ShaleStore<Node> + Send + Sync, T> Stream for MerkleKeyValueStream<'a, S, T> {

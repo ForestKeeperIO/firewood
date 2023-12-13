@@ -21,7 +21,6 @@ pub use node::{
     NodeType, PartialPath,
 };
 pub use proof::{Proof, ProofError};
-use stream::IteratorState;
 pub use stream::MerkleKeyValueStream;
 pub use trie_hash::{TrieHash, TRIE_HASH_LEN};
 
@@ -1222,11 +1221,7 @@ impl<S: ShaleStore<Node> + Send + Sync, T> Merkle<S, T> {
         key: Option<K>,
         root: DiskAddress,
     ) -> Result<MerkleKeyValueStream<'_, S, T>, MerkleError> {
-        Ok(MerkleKeyValueStream {
-            key_state: IteratorState::new(key),
-            merkle_root: root,
-            merkle: self,
-        })
+        Ok(MerkleKeyValueStream::new(key, root, self))
     }
 
     pub(super) async fn range_proof<K: api::KeyType + Send + Sync>(
