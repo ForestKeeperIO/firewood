@@ -12,25 +12,23 @@ use std::{ops::Not, task::Poll};
 enum IteratorState<'a> {
     /// Start iterating at the beginning of the trie,
     /// returning the lowest key/value pair first
+    // TODO: investigate removing StartAtBeginning by using the empty key as the starting key
     StartAtBeginning,
     /// Start iterating at the specified key
+    // TODO: change to Box<[u8]>
     StartAtKey(Vec<u8>),
+    // TODO: change the name to visited-node-path and fix the docs
     /// Continue iterating after the given `next_node` and parents
+    // parents.last() is the last returned value
     Iterating { parents: Vec<(ObjRef<'a>, u8)> },
 }
+
 impl IteratorState<'_> {
-    pub(super) fn new<K: AsRef<[u8]>>(starting: Option<K>) -> Self {
+    fn new<K: AsRef<[u8]>>(starting: Option<K>) -> Self {
         match starting {
             None => Self::StartAtBeginning,
             Some(key) => Self::StartAtKey(key.as_ref().to_vec()),
         }
-    }
-}
-
-// The default state is to start at the beginning
-impl<'a> Default for IteratorState<'a> {
-    fn default() -> Self {
-        Self::StartAtBeginning
     }
 }
 
@@ -39,7 +37,11 @@ pub struct MerkleKeyValueStream<'a, S, T> {
     key_state: IteratorState<'a>,
     merkle_root: DiskAddress,
     merkle: &'a Merkle<S, T>,
+    // TODO: create an issue to investigate adding merkle_root to Merkle
 }
+
+// TODO: add fused here
+// impl FusedStream for MerkleKeyValueStream<'a> { ... }
 
 impl<'a, S, T> MerkleKeyValueStream<'a, S, T> {
     /// Create a new stream that iterates over the keys/values in the merkle trie
@@ -67,7 +69,8 @@ impl<'a, S: ShaleStore<Node> + Send + Sync, T> Stream for MerkleKeyValueStream<'
         mut self: std::pin::Pin<&mut Self>,
         _cx: &mut std::task::Context<'_>,
     ) -> Poll<Option<Self::Item>> {
-        let MerkleKeyValueStream {
+        // TODO: Explain why destructuring is needed here
+        let Self {
             key_state,
             merkle_root,
             merkle,
@@ -92,26 +95,41 @@ impl<'a, S: ShaleStore<Node> + Send + Sync, T> Stream for MerkleKeyValueStream<'
             }
 
             IteratorState::StartAtKey(key) => {
-                if key.is_empty() {
-                    self.key_state = IteratorState::StartAtBeginning;
-                    return self.poll_next(_cx);
-                }
+                // TODO: does this still work? add test case to prove
+                // if key.is_empty() {
+                //     self.key_state = IteratorState::StartAtBeginning;
+                //     return self.poll_next(_cx);
+                // }
 
-                let root_node = merkle
+                let sentinal_node = merkle
                     .get_node(*merkle_root)
                     .map_err(|e| api::Error::InternalError(Box::new(e)))?;
 
+                // TODO: add comment explaining what happens here
+                // TODO: add tests:
+                //       - test for key that's on a branch without a value
+                //       - test for key that does exist (easy)
+                //       - test for key that does not exist in the middle down to a leaf
+                //         - example: key "aa" exists but start at "aaa"
+                //         - example: key "aa" and "aab" exists but start at "aaa"
+                //         - example: key "aa" and "aab" exists but start at "aac"
+                //       - test for key that does not exist to right of all <- definitely not covered
+                //       - test for key that does not exist to left of all (probably covered)
+
                 let (found_node, mut parents) = merkle
-                    .get_node_and_parents_by_key(root_node, &key)
+                    .get_node_and_parents_by_key(sentinal_node, &key)
                     .map_err(|e| api::Error::InternalError(Box::new(e)))?;
 
                 if let Some(found_node) = found_node {
                     let value = match found_node.inner() {
                         NodeType::Branch(branch) => branch.value.as_ref(),
+                        // TODO: pick one, value or data, for branch/leaf
                         NodeType::Leaf(leaf) => Some(&leaf.data),
-                        NodeType::Extension(_) => None,
+                        NodeType::Extension(_) => None, // TODO: remove this case
                     };
 
+                    // TODO: don't wrap, error if Extension found, then no map
+                    // is needed here
                     let next_result = value.map(|value| {
                         let value = value.to_vec();
 
@@ -123,6 +141,9 @@ impl<'a, S: ShaleStore<Node> + Send + Sync, T> Stream for MerkleKeyValueStream<'
                     self.key_state = IteratorState::Iterating { parents };
 
                     return Poll::Ready(next_result);
+                } else {
+                    // TODO: comment out if needed
+                    unimplemented!()
                 }
 
                 self.key_state = IteratorState::Iterating { parents };
