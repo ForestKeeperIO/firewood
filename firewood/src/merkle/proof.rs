@@ -3,8 +3,6 @@
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::iter::Peekable;
-use std::ops::Deref;
 
 use crate::shale::{disk_address::DiskAddress, ShaleError, ShaleStore};
 use crate::v2::api::HashKey;
@@ -286,10 +284,9 @@ impl<N: AsRef<[u8]> + Send> Proof<N> {
 
             // TODO(Hao): (Optimization) If a node is already decode we don't need to decode again.
             let child_node = NodeType::decode(child_proof.as_ref())?;
-            let child_node = merkle
+            let mut child_node = merkle
                 .put_node(Node::from(child_node))
                 .map_err(ProofError::InvalidNode)?;
-            let mut child_addr = child_node.as_ptr();
 
             // Link the child to the parent based on the node type.
             match &parent_node_ref.inner() {
@@ -297,7 +294,7 @@ impl<N: AsRef<[u8]> + Send> Proof<N> {
                 NodeType::Branch(n) => match n.chd()[child_index] {
                     // If the child already resolved, then use the existing node.
                     Some(node) => {
-                        child_addr = node;
+                        child_node = merkle.get_node(node)?;
                     }
                     None => {
                         // insert the leaf to the empty slot
@@ -306,7 +303,7 @@ impl<N: AsRef<[u8]> + Send> Proof<N> {
                             .write(|node| {
                                 #[allow(clippy::indexing_slicing)]
                                 let node = node.inner_mut().as_branch_mut().unwrap();
-                                node.chd_mut()[child_index] = Some(child_addr);
+                                node.chd_mut()[child_index] = Some(child_node.as_ptr());
                             })
                             .unwrap();
                     }
@@ -317,14 +314,15 @@ impl<N: AsRef<[u8]> + Send> Proof<N> {
                     parent_node_ref
                         .write(|node| {
                             let node = node.inner_mut().as_extension_mut().unwrap();
-                            *node.chd_mut() = child_addr;
+                            *node.chd_mut() = child_node.as_ptr();
                         })
                         .unwrap();
                 }
 
                 NodeType::Extension(n) => {
                     // If the child already resolved, then use the existing node.
-                    child_addr = n.chd();
+                    // child_addr = n.chd();
+                    child_node = merkle.get_node(n.chd())?;
                 }
 
                 // We should not hit a leaf node as a parent.
@@ -413,105 +411,6 @@ impl<N: AsRef<[u8]> + Send> Proof<N> {
             Some(data) => Ok(Some(data)),
             None if allow_non_existent_node => Ok(None),
             None => Err(ProofError::NodeNotInTrie),
-        }
-    }
-
-    /// Decode the value to generate the corresponding type of node, and locate the subproof.
-    ///
-    /// # Arguments
-    ///
-    /// * `merkle` - The merkle tree.
-    ///
-    /// * `key_nibbles` - The nibbles iterator of the key.
-    ///
-    /// * `buf` - The encoded node.
-    ///
-    /// * `end_node` - A boolean indicates whether this is the end node to decode, thus no `key`
-    ///                to be present.
-    ///
-    ///  # Returns `Result<(addr, subproof, nibbles), ProofError>`
-    ///
-    /// * `addr` - The new address of the node after it's decoded and inserted into the cache.
-    ///
-    /// * `subproof` - An `Option<SubProof>`, `None` if the sub-proof does not exist or the node's partial-path
-    /// does not match the given key
-    ///
-    /// * `nibbles` - The remaining nibbles iterator of the key or an empty iterator if the node's partial-path
-    /// does not match the given key
-    ///
-    fn decode_node<'a, S: ShaleStore<Node> + Send + Sync, T: BinarySerde>(
-        &self,
-        merkle: &Merkle<S, T>,
-        mut key_nibbles: Peekable<NibblesIterator<'a, 0>>,
-        buf: &[u8],
-        end_node: bool,
-    ) -> Result<
-        (
-            DiskAddress,
-            Option<SubProof>,
-            Peekable<NibblesIterator<'a, 0>>,
-        ),
-        ProofError,
-    > {
-        let node = NodeType::decode(buf)?;
-        let new_node = merkle
-            .put_node(Node::from(node))
-            .map_err(ProofError::InvalidNode)?;
-        let addr = new_node.as_ptr();
-
-        match new_node.inner() {
-            NodeType::Leaf(n) => {
-                let paths_match = n
-                    .path
-                    .iter()
-                    .copied()
-                    .all(|nibble| Some(nibble) == key_nibbles.next());
-
-                if !paths_match {
-                    return Ok((addr, None, Nibbles::new(&[]).into_iter().peekable()));
-                }
-
-                let subproof = SubProof::Data(n.data().to_vec());
-
-                Ok((addr, subproof.into(), key_nibbles))
-            }
-            NodeType::Extension(n) => {
-                let paths_match = n
-                    .path
-                    .iter()
-                    .copied()
-                    .all(|nibble| Some(nibble) == key_nibbles.next());
-
-                if !paths_match {
-                    return Ok((addr, None, Nibbles::new(&[]).into_iter().peekable()));
-                }
-
-                let encoded = n.chd_encoded().ok_or(ProofError::InvalidData)?;
-                let subproof = generate_subproof(encoded).map(Some)?;
-
-                Ok((addr, subproof, key_nibbles))
-            }
-            // If the node is the last one to be decoded, then no subproof to be extracted.
-            // returned iterator not used for `end_node` case
-            NodeType::Branch(_) if end_node => {
-                Ok((addr, None, Nibbles::new(&[]).into_iter().peekable()))
-            }
-
-            NodeType::Branch(n) => {
-                // Check if the subproof with the given key exist.
-                let Some(index) = key_nibbles.peek().map(|i| *i as usize) else {
-                    return Err(ProofError::NoSuchNode);
-                };
-
-                let subproof = n
-                    .chd_encode()
-                    .get(index)
-                    .and_then(|inner| inner.as_ref())
-                    .map(|data| generate_subproof(data))
-                    .transpose()?;
-
-                Ok((addr, subproof, key_nibbles))
-            }
         }
     }
 }
