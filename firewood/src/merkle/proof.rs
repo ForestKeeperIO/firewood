@@ -406,7 +406,7 @@ impl<N: AsRef<[u8]> + Send> Proof<N> {
                 }
             }
 
-            parent_node_ref = merkle.get_node(child_addr)?;
+            parent_node_ref = child_node;
         };
 
         match sub_proof {
