@@ -355,10 +355,10 @@ impl<N: AsRef<[u8]> + Send> Proof<N> {
                         .all(|nibble| Some(nibble) == key_nibbles.next());
 
                     if !paths_match {
-                        (true, None, key_nibbles.next())
+                        (true, None, None)
                     } else {
                         let encoded = n.chd_encoded().ok_or(ProofError::InvalidData)?.to_vec();
-                        (false, Some(encoded), key_nibbles.next())
+                        (false, Some(encoded), None)
                     }
                 }
 
