@@ -261,6 +261,7 @@ impl Node {
 
     pub(super) fn rehash(&mut self) {
         self.encoded = OnceLock::new();
+        self.is_encoded_longer_than_hash_len = OnceLock::new();
         self.root_hash = OnceLock::new();
     }
 
@@ -282,6 +283,7 @@ impl Node {
 
     pub(super) fn new_from_hash(
         root_hash: Option<TrieHash>,
+        encoded: Option<Vec<u8>>,
         is_encoded_longer_than_hash_len: Option<bool>,
         inner: NodeType,
     ) -> Self {
@@ -290,7 +292,10 @@ impl Node {
                 Some(h) => OnceLock::from(h),
                 None => OnceLock::new(),
             },
-            encoded: OnceLock::new(),
+            encoded: match encoded {
+                Some(e) => OnceLock::from(e),
+                None => OnceLock::new(),
+            },
             is_encoded_longer_than_hash_len: match is_encoded_longer_than_hash_len {
                 Some(v) => OnceLock::from(v),
                 None => OnceLock::new(),
@@ -309,10 +314,14 @@ impl Node {
     }
 }
 
+const ENCODED_LEN: usize = TRIE_HASH_LEN;
+
 #[repr(C)]
 struct Meta {
     root_hash: [u8; TRIE_HASH_LEN],
     attrs: NodeAttributes,
+    encoded_len: [u8; size_of::<u64>()],
+    encoded: [u8; ENCODED_LEN],
     type_id: NodeTypeId,
 }
 
@@ -375,8 +384,28 @@ impl Storable for Node {
             None
         };
 
+        let mut start_index = TRIE_HASH_LEN + 1;
+        let end_index = start_index + size_of::<u64>();
         #[allow(clippy::indexing_slicing)]
-        let type_id: NodeTypeId = meta_raw.as_deref()[TRIE_HASH_LEN + 1].try_into()?;
+        let encoded_len = u64::from_le_bytes(
+            meta_raw.as_deref()[start_index..end_index]
+                .try_into()
+                .expect("invalid slice"),
+        );
+
+        start_index = end_index;
+        let mut encoded = None;
+        if encoded_len > 0 {
+            encoded = Some(
+                meta_raw.as_deref()[start_index..start_index + encoded_len as usize]
+                    .try_into()
+                    .expect("invalid slice"),
+            );
+        }
+
+        start_index = start_index + ENCODED_LEN;
+        #[allow(clippy::indexing_slicing)]
+        let type_id: NodeTypeId = meta_raw.as_deref()[start_index].try_into()?;
 
         let is_encoded_longer_than_hash_len =
             if attrs.contains(NodeAttributes::IS_ENCODED_BIG_VALID) {
@@ -393,6 +422,7 @@ impl Storable for Node {
 
                 Ok(Self::new_from_hash(
                     root_hash,
+                    encoded,
                     is_encoded_longer_than_hash_len,
                     inner,
                 ))
@@ -400,14 +430,16 @@ impl Storable for Node {
 
             NodeTypeId::Extension => {
                 let inner = NodeType::Extension(ExtNode::deserialize(offset, mem)?);
-                let node = Self::new_from_hash(root_hash, is_encoded_longer_than_hash_len, inner);
+                let node =
+                    Self::new_from_hash(root_hash, encoded, is_encoded_longer_than_hash_len, inner);
 
                 Ok(node)
             }
 
             NodeTypeId::Leaf => {
                 let inner = NodeType::Leaf(LeafNode::deserialize(offset, mem)?);
-                let node = Self::new_from_hash(root_hash, is_encoded_longer_than_hash_len, inner);
+                let node =
+                    Self::new_from_hash(root_hash, encoded, is_encoded_longer_than_hash_len, inner);
 
                 Ok(node)
             }
@@ -416,7 +448,6 @@ impl Storable for Node {
 
     fn serialized_len(&self) -> u64 {
         Meta::SIZE as u64
-            + 1
             + match &self.inner {
                 NodeType::Branch(n) => {
                     // TODO: add path
@@ -441,10 +472,14 @@ impl Storable for Node {
             }
         };
 
+        let mut encoded_len: u64 = 0;
+        let mut encoded = None;
         if let Some(b) = self.encoded.get() {
             attrs.insert(if b.len() > TRIE_HASH_LEN {
                 NodeAttributes::LONG
             } else {
+                encoded_len = b.len() as u64;
+                encoded = Some(b);
                 NodeAttributes::IS_ENCODED_BIG_VALID
             });
         } else if let Some(b) = self.is_encoded_longer_than_hash_len.get() {
@@ -457,6 +492,13 @@ impl Storable for Node {
 
         #[allow(clippy::unwrap_used)]
         cur.write_all(&[attrs.bits()]).unwrap();
+
+        cur.write_all(&encoded_len.to_le_bytes())?;
+        if let Some(encoded) = encoded {
+            cur.write_all(encoded)?;
+        } else {
+            cur.write_all(&[0; 32])?;
+        }
 
         match &self.inner {
             NodeType::Branch(n) => {
