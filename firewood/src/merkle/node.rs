@@ -477,7 +477,7 @@ impl Storable for Node {
             let encoded_len = encoded_len.filter(|len| *len <= TRIE_HASH_LEN as u64);
             let encoded = std::array::from_fn({
                 let mut iter = encoded_len
-                    .and_then(|_| encoded)
+                    .and(encoded)
                     .map(Vec::as_slice)
                     .unwrap_or_default()
                     .iter()

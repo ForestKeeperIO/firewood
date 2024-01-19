@@ -86,7 +86,7 @@ impl Storable for LeafNode {
         let mut cursor = Cursor::new(to);
 
         let path = &self.path.encode(true);
-        let path = from_nibbles(&path);
+        let path = from_nibbles(path);
         let data = &self.data;
 
         let path_len = self.path.serialized_len() as PathLen;
@@ -120,7 +120,7 @@ impl Storable for LeafNode {
             })?
             .as_deref();
 
-        let offset = offset + Meta::SIZE as usize;
+        let offset = offset + Meta::SIZE;
         let Meta { path_len, data_len } = *bytemuck::from_bytes(&node_header_raw);
         let size = path_len as u64 + data_len as u64;
 
@@ -132,7 +132,7 @@ impl Storable for LeafNode {
         let (path, data) = remainder.split_at(path_len as usize);
 
         let path = {
-            let nibbles = Nibbles::<0>::new(&path).into_iter();
+            let nibbles = Nibbles::<0>::new(path).into_iter();
             PartialPath::from_nibbles(nibbles).0
         };
 
