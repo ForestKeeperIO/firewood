@@ -484,15 +484,14 @@ impl Storable for Node {
 
         let type_id = NodeTypeId::from(&self.inner);
 
-        let root_hash = match self.root_hash.get() {
-            Some(&root_hash) => {
+        let root_hash = self.root_hash.get().map_or_else(
+            || TrieHash([0; TRIE_HASH_LEN]),
+            |hash| {
                 attrs.insert(NodeAttributes::ROOT_HASH_VALID);
-                root_hash
-            }
-            // we store a zero hash when ROOT_HASH_VALID is not set
-            None => TrieHash([0; TRIE_HASH_LEN]),
-        };
-        
+                *hash
+            },
+        );
+
         let meta = Meta {
             root_hash,
             attrs,
