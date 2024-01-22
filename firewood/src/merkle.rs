@@ -199,7 +199,7 @@ impl<S: ShaleStore<Node> + Send + Sync, T> Merkle<S, T> {
             .children[0];
         Ok(if let Some(root) = root {
             let mut node = self.get_node(root)?;
-            let res = node.get_root_hash::<S>(self.store.as_ref()).clone();
+            let res = *node.get_root_hash::<S>(self.store.as_ref());
             #[allow(clippy::unwrap_used)]
             if node.is_dirty() {
                 node.write(|_| {}).unwrap();
@@ -207,7 +207,7 @@ impl<S: ShaleStore<Node> + Send + Sync, T> Merkle<S, T> {
             }
             res
         } else {
-            Self::empty_root().clone()
+            *Self::empty_root()
         })
     }
 

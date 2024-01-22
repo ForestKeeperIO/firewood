@@ -1,6 +1,8 @@
 // Copyright (C) 2023, Ava Labs, Inc. All rights reserved.
 // See the file LICENSE.md for licensing terms.
 
+use bytemuck::{Pod, Zeroable};
+
 use crate::shale::{CachedStore, ShaleError, Storable};
 use std::{
     fmt::{self, Debug},
@@ -10,7 +12,8 @@ use std::{
 pub const TRIE_HASH_LEN: usize = 32;
 const U64_TRIE_HASH_LEN: u64 = TRIE_HASH_LEN as u64;
 
-#[derive(PartialEq, Eq, Clone)]
+#[derive(PartialEq, Eq, Clone, Copy, Pod, Zeroable)]
+#[repr(transparent)]
 pub struct TrieHash(pub [u8; TRIE_HASH_LEN]);
 
 impl std::ops::Deref for TrieHash {

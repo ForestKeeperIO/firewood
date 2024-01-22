@@ -321,7 +321,7 @@ impl Node {
 #[derive(Clone, Copy, CheckedBitPattern, NoUninit)]
 #[repr(C, packed)]
 struct Meta {
-    root_hash: [u8; TRIE_HASH_LEN],
+    root_hash: TrieHash,
     attrs: NodeAttributes,
     encoded_len: u64,
     encoded: [u8; TRIE_HASH_LEN],
@@ -391,7 +391,7 @@ impl Storable for Node {
         let offset = offset + Meta::SIZE;
 
         let root_hash = if attrs.contains(NodeAttributes::ROOT_HASH_VALID) {
-            Some(TrieHash(root_hash))
+            Some(root_hash)
         } else {
             None
         };
@@ -454,7 +454,6 @@ impl Storable for Node {
         trace!("[{self:p}] Serializing node");
         let mut cursor = Cursor::new(to);
 
-        let root_hash = self.root_hash.get().map(|hash| hash.0);
         let encoded = self.encoded.get();
         let encoded_len = encoded.map(Vec::len).map(|len| len as u64);
 
@@ -466,12 +465,6 @@ impl Storable for Node {
             (Some(_), _) | (None, Some(false)) => NodeAttributes::IS_ENCODED_BIG_VALID,
             (None, None) => NodeAttributes::empty(),
         };
-
-        if root_hash.is_some() {
-            attrs.insert(NodeAttributes::ROOT_HASH_VALID);
-        }
-
-        let root_hash = root_hash.unwrap_or_default();
 
         let (encoded_len, encoded) = {
             let encoded_len = encoded_len.filter(|len| *len <= TRIE_HASH_LEN as u64);
@@ -491,6 +484,15 @@ impl Storable for Node {
 
         let type_id = NodeTypeId::from(&self.inner);
 
+        let root_hash = match self.root_hash.get() {
+            Some(&root_hash) => {
+                attrs.insert(NodeAttributes::ROOT_HASH_VALID);
+                root_hash
+            }
+            // we store a zero hash when ROOT_HASH_VALID is not set
+            None => TrieHash([0; TRIE_HASH_LEN]),
+        };
+        
         let meta = Meta {
             root_hash,
             attrs,
