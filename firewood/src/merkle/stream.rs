@@ -15,7 +15,7 @@ type Value = Vec<u8>;
 /// Represents an ongoing iteration over a branch node's children.
 struct BranchIterator {
     /// The nibbles of the key at this branch node.
-    key_nibbles: Vec<u8>,
+    key_nibbles: Box<[u8]>,
     /// Returns the non-empty children of this node and their positions
     /// in the node's children array .
     children_iter: Box<dyn Iterator<Item = (DiskAddress, u8)> + Send>,
@@ -129,7 +129,7 @@ fn get_iterator_intial_state<S: ShaleStore<Node> + Send + Sync, T>(
                     .filter(move |(_, child_pos)| comparer(child_pos, &pos));
 
                 branch_iter_stack.push(BranchIterator {
-                    key_nibbles: matched_key_nibbles.clone(),
+                    key_nibbles: matched_key_nibbles.clone().into_boxed_slice(),
                     children_iter: Box::new(children_iter),
                 });
                 matched_key_nibbles.push(pos);
@@ -141,7 +141,7 @@ fn get_iterator_intial_state<S: ShaleStore<Node> + Send + Sync, T>(
                     get_children_iter(branch).filter(move |(_, child_pos)| child_pos > &pos);
 
                 branch_iter_stack.push(BranchIterator {
-                    key_nibbles: matched_key_nibbles.clone(),
+                    key_nibbles: matched_key_nibbles.clone().into_boxed_slice(),
                     children_iter: Box::new(children_iter),
                 });
                 matched_key_nibbles.push(pos);
@@ -176,7 +176,7 @@ fn get_iterator_intial_state<S: ShaleStore<Node> + Send + Sync, T>(
                         let iter = std::iter::once((extension.chd(), prev_index));
 
                         branch_iter_stack.push(BranchIterator {
-                            key_nibbles,
+                            key_nibbles: key_nibbles.into(),
                             children_iter: Box::new(iter),
                         });
                         break;
@@ -200,7 +200,7 @@ fn get_iterator_intial_state<S: ShaleStore<Node> + Send + Sync, T>(
                             };
 
                             branch_iter_stack.push(BranchIterator {
-                                key_nibbles: matched_key_nibbles.clone(),
+                                key_nibbles: matched_key_nibbles.clone().into_boxed_slice(),
                                 children_iter: Box::new(get_children_iter(branch)),
                             });
                             break;
@@ -283,7 +283,7 @@ impl<'a, S: ShaleStore<Node> + Send + Sync, T> Stream for MerkleKeyValueStream<'
                         .get_node(node_addr)
                         .map_err(|e| api::Error::InternalError(Box::new(e)))?;
 
-                    let mut child_key_nibbles = branch_iter.key_nibbles.clone(); // TODO reduce¸cloning
+                    let mut child_key_nibbles = branch_iter.key_nibbles.to_vec(); // TODO reduce¸cloning
                     child_key_nibbles.push(pos);
 
                     branch_iter_stack.push(branch_iter);
@@ -296,7 +296,7 @@ impl<'a, S: ShaleStore<Node> + Send + Sync, T> Stream for MerkleKeyValueStream<'
                             let children_iter = get_children_iter(branch);
 
                             branch_iter_stack.push(BranchIterator {
-                                key_nibbles: child_key_nibbles.clone(), // TODO reduce¸cloning
+                                key_nibbles: child_key_nibbles.clone().into_boxed_slice(), // TODO reduce¸cloning
                                 children_iter: Box::new(children_iter),
                             });
 
@@ -334,7 +334,7 @@ impl<'a, S: ShaleStore<Node> + Send + Sync, T> Stream for MerkleKeyValueStream<'
                             child_key.extend(extension.path.iter());
 
                             branch_iter_stack.push(BranchIterator {
-                                key_nibbles: child_key.clone(),
+                                key_nibbles: child_key.clone().into(),
                                 children_iter: Box::new(children_iter),
                             });
 
