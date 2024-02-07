@@ -11,6 +11,8 @@ use std::sync::{Arc, RwLock, RwLockWriteGuard};
 
 use thiserror::Error;
 
+use crate::merkle::{LeafNode, Node};
+
 pub mod cached;
 pub mod compact;
 pub mod disk_address;
@@ -36,6 +38,10 @@ pub enum ShaleError {
     InvalidCacheView { offset: usize, size: u64 },
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("tried to convert an empty reference to an object")]
+    EmptyRef,
+    #[error("tried to convert a ref of a dirty object")]
+    DirtyObj,
 }
 
 // TODO:
@@ -107,6 +113,22 @@ pub struct Obj<T: Storable> {
     dirty: Option<u64>,
 }
 
+impl Obj<Node> {
+    pub fn into_inner(mut self) -> Result<Node, Box<Self>> {
+        if self.dirty.is_some() {
+            return Err(Box::new(self));
+        }
+
+        // required because the node will check for dirty writes on Drop
+        let node = std::mem::replace(
+            &mut self.value.decoded,
+            Node::from_leaf(LeafNode::new(Vec::new(), Vec::new())),
+        );
+
+        Ok(node)
+    }
+}
+
 impl<T: Storable> Obj<T> {
     #[inline(always)]
     pub const fn as_ptr(&self) -> DiskAddress {
@@ -173,6 +195,21 @@ impl<T: Storable> Deref for Obj<T> {
 pub struct ObjRef<'a, T: Storable> {
     inner: Option<Obj<T>>,
     cache: &'a ObjCache<T>,
+}
+
+impl<'a> ObjRef<'a, Node> {
+    pub fn into_inner(mut self) -> Result<Node, ShaleError> {
+        match self.inner.take() {
+            Some(inner) => match inner.into_inner() {
+                Ok(node) => Ok(node),
+                Err(obj) => {
+                    self.inner = Some(*obj);
+                    Err(ShaleError::DirtyObj)
+                }
+            },
+            None => Err(ShaleError::EmptyRef),
+        }
+    }
 }
 
 impl<'a, T: Storable + Debug> ObjRef<'a, T> {
