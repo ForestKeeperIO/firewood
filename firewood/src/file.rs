@@ -5,13 +5,18 @@
 
 use std::fs::{create_dir, remove_dir_all};
 use std::ops::Deref;
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::{io::ErrorKind, os::unix::prelude::OpenOptionsExt};
 
+use tokio::sync::Mutex;
+
+#[derive(Debug)]
 pub struct File {
     fd: OwnedFd,
+    tokio_file: Mutex<Option<Arc<Mutex<tokio::fs::File>>>>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -21,6 +26,18 @@ pub enum Options {
 }
 
 impl File {
+    pub async fn tokio_file(&self) -> Arc<Mutex<tokio::fs::File>> {
+        let mut guard = self.tokio_file.lock().await;
+        match (*guard).as_ref() {
+            Some(file) => file.clone(),
+            None => {
+                let file = Arc::new(Mutex::new(unsafe {tokio::fs::File::from_raw_fd(self.fd.as_raw_fd())}));            
+                *guard = Some(file.clone());
+                file
+            }
+        }
+    }
+
     pub fn open_file(
         rootpath: PathBuf,
         fname: &str,
@@ -63,7 +80,7 @@ impl File {
                 _ => return Err(e),
             },
         };
-        Ok(File { fd })
+        Ok(File { fd, tokio_file: Mutex::new(None) })
     }
 }
 

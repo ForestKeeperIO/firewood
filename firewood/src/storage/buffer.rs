@@ -2,7 +2,9 @@
 // See the file LICENSE.md for licensing terms.
 
 //! Disk buffer for staging in memory pages and flushing them to disk.
+use std::collections::BTreeMap;
 use std::fmt::Debug;
+use std::io::SeekFrom;
 use std::ops::IndexMut;
 use std::os::fd::{AsFd, AsRawFd};
 use std::path::{Path, PathBuf};
@@ -20,6 +22,7 @@ use growthring::{
     walerror::WalError,
     WalFileImpl, WalStoreImpl,
 };
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::task::block_in_place;
 use tokio::{
     sync::{
@@ -32,7 +35,6 @@ use tokio::{
 use typed_builder::TypedBuilder;
 
 type BufferWrites = Box<[BufferWrite]>;
-
 
 #[derive(Debug)]
 pub enum BufferCmd {
@@ -351,6 +353,48 @@ async fn run_wal_queue(
     aiomgr: Rc<AioManager>,
 ) {
     use std::collections::hash_map::Entry::*;
+
+    // collect all the writes, putting them in order, and deduplicate them
+    while let Some((writes, ashes)) = writes.recv().await {
+        let writes_by_space_id: HashMap<u8, BTreeMap<u64, &Box<[u8; 4096]>>> = writes
+            .iter()
+            .map(|write| {
+                (
+                    write.space_id,
+                    write
+                        .delta
+                        .0
+                        .iter()
+                        .map(|DeltaPage(page, data)| (*page, data))
+                        .collect(),
+                )
+            })
+            .collect();
+        let future_writes = writes_by_space_id.iter().flat_map(|(space_id, writes)|
+            {
+                writes.iter().map(|(offset, data)| {
+                    // split the actual offset into a file_id and an offset within the file
+                    let (file_nbit, pool) = {
+                        let borrowed_pools: std::cell::Ref<'_, [Option<Arc<FilePool>>; 255]> = file_pools.borrow();
+                        let pool = borrowed_pools[*space_id as usize].as_ref().unwrap().clone();
+                        let file_nbit = pool.file_nbit;
+                        (file_nbit, pool)
+                    };
+                    let file_id = offset >> file_nbit;
+                    let file = pool.as_ref().get_file(file_id).expect("get file");
+
+                    let offset_within_file = offset % (1<<file_nbit);
+
+                    async move {
+                        let tokio_file = file.tokio_file().await;
+                        let mut tokio_file = tokio_file.lock().await;
+                        tokio_file.seek(SeekFrom::Start(offset_within_file)).await.expect("seek");
+                        tokio_file.write_all(data.as_slice()).await.expect("write");
+                    }
+                })
+            }).collect::<Vec<_>>();
+            futures::future::join_all(future_writes).await;
+        }
 
     loop {
         let mut bwrites = Vec::new();
