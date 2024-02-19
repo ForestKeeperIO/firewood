@@ -223,7 +223,7 @@ fn insert<const BATCHSIZE: usize, const KEYLEN: usize, const DATALEN: usize>(
 
 criterion_group! {
     name = benches;
-    config = Criterion::default().sample_size(20);
+    config = Criterion::default().sample_size(20).measurement_time(Duration::from_secs(30));
     targets = insert::<1, 32, 32>, insert::<20, 32, 32>, insert::<10000, 32, 32>
 }
 
