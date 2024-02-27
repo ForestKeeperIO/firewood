@@ -1,7 +1,7 @@
 // Copyright (C) 2023, Ava Labs, Inc. All rights reserved.
 // See the file LICENSE.md for licensing terms.
+use tokio::runtime::Builder as RuntimeBuilder;
 
-use futures::executor::block_on;
 use growthring::{
     wal::{WalBytes, WalLoader, WalRingId, WalWriter},
     walerror::WalError,
@@ -13,9 +13,10 @@ fn test(
     records: Vec<String>,
     wal: &mut WalWriter<WalFileImpl, WalStoreImpl>,
 ) -> Result<Vec<WalRingId>, ()> {
+    let runtime = RuntimeBuilder::new_current_thread().build().unwrap();
     let mut res = Vec::new();
     for r in wal.grow(records).into_iter() {
-        let ring_id = futures::executor::block_on(r)?.1;
+        let ring_id = runtime.block_on(r)?.1;
         println!("got ring id: {:?}", ring_id);
         res.push(ring_id);
     }
@@ -32,13 +33,15 @@ fn recover(payload: WalBytes, ringid: WalRingId) -> Result<(), WalError> {
 }
 
 fn main() -> Result<(), WalError> {
+    let runtime = RuntimeBuilder::new_current_thread().build().unwrap();
+
     let wal_dir = "./wal_demo1";
     let mut rng = rand::rngs::StdRng::seed_from_u64(0);
     let mut loader = WalLoader::new();
     loader.file_nbit(9).block_nbit(8);
 
     let store = WalStoreImpl::new(wal_dir, true)?;
-    let mut wal = block_on(loader.load(store, recover, 0))?;
+    let mut wal = runtime.block_on(loader.load(store, recover, 0))?;
     for _ in 0..3 {
         let _ = test(
             ["hi", "hello", "lol"]
@@ -56,7 +59,7 @@ fn main() -> Result<(), WalError> {
     }
 
     let store = WalStoreImpl::new(wal_dir, false)?;
-    let mut wal = block_on(loader.load(store, recover, 0))?;
+    let mut wal = runtime.block_on(loader.load(store, recover, 0))?;
     for _ in 0..3 {
         let _ = test(
             vec![
@@ -70,7 +73,7 @@ fn main() -> Result<(), WalError> {
     }
 
     let store = WalStoreImpl::new(wal_dir, false)?;
-    let mut wal = block_on(loader.load(store, recover, 100))?;
+    let mut wal = runtime.block_on(loader.load(store, recover, 100))?;
     let mut history = std::collections::VecDeque::new();
     for _ in 0..3 {
         let mut ids = Vec::new();
@@ -94,11 +97,11 @@ fn main() -> Result<(), WalError> {
         ids.shuffle(&mut rng);
         for e in ids.chunks(20) {
             println!("peel(20)");
-            futures::executor::block_on(wal.peel(e, 100))?;
+            runtime.block_on(wal.peel(e, 100))?;
         }
     }
     for (rec, ans) in
-        block_on(wal.read_recent_records(100, &growthring::wal::RecoverPolicy::Strict))?
+        runtime.block_on(wal.read_recent_records(100, &growthring::wal::RecoverPolicy::Strict))?
             .into_iter()
             .zip(history.into_iter().rev())
     {
