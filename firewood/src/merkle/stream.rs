@@ -792,6 +792,10 @@ mod tests {
         // Covers case of branch with no value
         let (key, node) = stream.next().await.unwrap().unwrap();
         assert_eq!(key, vec![0x00].into_boxed_slice());
+        // let encoded_node = merkle.encode(node.inner()).unwrap();
+        // let decoded_node = merkle.decode(&encoded_node).unwrap();
+        // let encoded_from_decoded = merkle.encode(&decoded_node).unwrap();
+        // assert_eq!(encoded_node, encoded_from_decoded);
         let node = node.inner().as_branch().unwrap();
         assert!(node.value.is_none());
         assert_eq!(node.path.to_vec(), vec![0x00, 0x00]);
@@ -799,6 +803,10 @@ mod tests {
         // Covers case of branch with value
         let (key, node) = stream.next().await.unwrap().unwrap();
         assert_eq!(key, vec![0x00, 0x00, 0x00].into_boxed_slice());
+        let encoded_node = merkle.encode(node.inner()).unwrap();
+        let decoded_node = merkle.decode(&encoded_node).unwrap();
+        let encoded_from_decoded = merkle.encode(&decoded_node).unwrap();
+        assert_eq!(encoded_node, encoded_from_decoded);
         let node = node.inner().as_branch().unwrap();
         assert_eq!(node.value.clone().unwrap().to_vec(), vec![0x00, 0x00, 0x00]);
         assert_eq!(node.path.to_vec(), vec![0x00, 0x00, 0x00]);
@@ -806,18 +814,36 @@ mod tests {
         // Covers case of leaf with partial path
         let (key, node) = stream.next().await.unwrap().unwrap();
         assert_eq!(key, vec![0x00, 0x00, 0x00, 0x01].into_boxed_slice());
+        // TODO remove
+        let encoded_node = merkle.encode(node.inner()).unwrap();
+        let decoded_node = merkle.decode(&encoded_node).unwrap();
+        let encoded_from_decoded = merkle.encode(&decoded_node).unwrap();
+        assert_eq!(encoded_node, encoded_from_decoded);
+        // END TODO
         let node = node.inner().as_leaf().unwrap();
         assert_eq!(node.clone().data.to_vec(), vec![0x00, 0x00, 0x00, 0x01]);
         assert_eq!(node.path.to_vec(), vec![0x01]);
 
         let (key, node) = stream.next().await.unwrap().unwrap();
         assert_eq!(key, vec![0x00, 0x00, 0x00, 0xFF].into_boxed_slice());
+        // TODO remove
+        let encoded_node = merkle.encode(node.inner()).unwrap();
+        let decoded_node = merkle.decode(&encoded_node).unwrap();
+        let encoded_from_decoded = merkle.encode(&decoded_node).unwrap();
+        assert_eq!(encoded_node, encoded_from_decoded);
+        // END TODO
         let node = node.inner().as_leaf().unwrap();
         assert_eq!(node.clone().data.to_vec(), vec![0x00, 0x00, 0x00, 0xFF]);
         assert_eq!(node.path.to_vec(), vec![0x0F]);
 
         let (key, node) = stream.next().await.unwrap().unwrap();
         assert_eq!(key, vec![0x00, 0xD0, 0xD0].into_boxed_slice());
+        // TODO remove
+        let encoded_node = merkle.encode(node.inner()).unwrap();
+        let decoded_node = merkle.decode(&encoded_node).unwrap();
+        let encoded_from_decoded = merkle.encode(&decoded_node).unwrap();
+        assert_eq!(encoded_node, encoded_from_decoded);
+        // END TODO
         let node = node.inner().as_leaf().unwrap();
         assert_eq!(node.clone().data.to_vec(), vec![0x00, 0xD0, 0xD0]);
         assert_eq!(node.path.to_vec(), vec![0x00, 0x0D, 0x00]); // 0x0D00 becomes 0xDO
@@ -825,6 +851,12 @@ mod tests {
         // Covers case of leaf with no partial path
         let (key, node) = stream.next().await.unwrap().unwrap();
         assert_eq!(key, vec![0x00, 0xFF].into_boxed_slice());
+        // TODO remove
+        let encoded_node = merkle.encode(node.inner()).unwrap();
+        let decoded_node = merkle.decode(&encoded_node).unwrap();
+        let encoded_from_decoded = merkle.encode(&decoded_node).unwrap();
+        assert_eq!(encoded_node, encoded_from_decoded);
+        // END TODO
         let node = node.inner().as_leaf().unwrap();
         assert_eq!(node.clone().data.to_vec(), vec![0x00, 0xFF]);
         assert_eq!(node.path.to_vec(), vec![0x0F]);

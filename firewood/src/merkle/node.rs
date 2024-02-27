@@ -679,10 +679,9 @@ impl Serialize for EncodedNode<Bincode> {
                     Encoded::default()
                 };
 
-                let serialized_path = Bincode::serialize(&path.encode(false))
-                    .map_err(|e| S::Error::custom(format!("bincode error: {e}")))?;
+                let serialized_path = from_nibbles(&path.encode(false)).collect();
 
-                list[BranchNode::MAX_CHILDREN + 1] = Encoded::Data(serialized_path);
+                list[BranchNode::MAX_CHILDREN + 1] = Encoded::Raw(serialized_path);
 
                 let mut seq = serializer.serialize_seq(Some(list.len()))?;
 
